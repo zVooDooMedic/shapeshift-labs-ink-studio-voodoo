@@ -86,6 +86,63 @@ Read it like this:
 - `colours 6 → 5` — one ramp step got absorbed by the snap. Watch this number
   walk *down* as cells grow: that is the palette contracting, which is correct.
 
+## Built: `--palette-mode ramp` (2026-11-17)
+
+The stage is real, and it takes the ramps as **ground truth from the diorama** —
+no hue guessing. `tools/frames-dump.js` sets `globalThis.INK_RAMPS` before the
+build, so the dump carries `pal` (the scene palette) and `ramps` (each ramp's
+palette indices and dab count). `look.py` turns each ramp into a lattice ladder:
+
+```
+ramp  ->  hue/chroma band measured from the colours the studio actually shaded on
+          (circular-mean hue, chroma from the ramp's own max)
+band  ->  the lattice colours inside that band, sorted dark -> light  = the rungs
+cell  ->  nearest column by hue, then nearest colour inside THAT column
+```
+
+The ramp owns the **hue column**, the lattice owns the **rungs**. Both laws hold
+at once: no colour crosses materials, and `on-lattice` stays exactly 1.000.
+
+```bash
+/usr/bin/python3 tools/look.py --frames studio/out/frames-cabinet.json \
+  --palette-mode ramp      # default
+  --palette-mode global    # the old single-lattice behaviour
+  --ramp-neutral 0.022     # chroma under which a cell is grey/white/black (no material)
+  --ramp-hue-pad 14        # degrees of hue a ramp may occupy
+```
+
+### Measured (cabinet, 4 frames, real output)
+
+| frame | colours: ramp | colours: global | contraction |
+|---|---|---|---|
+| t0_yaw0 | 93 | 111 | 16.2% |
+| t0_yaw1 | 80 | 96 | 16.7% |
+| t6_yaw0 | 95 | 111 | 14.4% |
+| t6_yaw1 | 82 | 101 | 18.8% |
+
+- **14–19% palette contraction** with `on-lattice 1.000` in both modes: the frame
+  loses colours that were only there because different materials were borrowing
+  each other's shades.
+- **4–9% of pixels change** between the two modes — the stage is doing real work,
+  not relabelling.
+- With 27 ladders on the cabinet, ~73% of subject cells land on a material ramp;
+  the rest are neutrals (grey floor, white highlights) which correctly take the
+  plain lattice.
+
+### What it does *not* fix (measured, not guessed)
+
+Judging the two outputs side by side: the ramp frame reads as coherent pixel art
+— squirrel warm, orb green, glass cool, gold gold — where the global frame has
+salt-and-pepper colour noise. But the trade-off is real:
+
+- **Glass loses its transparency read.** The dome and the metal rim can share a
+  cool grey column, so glass starts to look like painted metal. Fixing that is a
+  `--ramp-hue-pad` / `--ramp-neutral` tuning job per scene, or better, keeping
+  glass on its own chroma band in the diorama.
+- **Floor and bases share one neutral column** by design. If you need separation
+  between two greys, that separation has to come from value, not hue — which is
+  the next lesson's job, not this one's.
+
 ## What bad looks like
 
 - **Cells of two sizes in one frame** — `cell_px / px` was not an integer.

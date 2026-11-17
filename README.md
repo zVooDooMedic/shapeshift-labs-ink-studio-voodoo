@@ -84,8 +84,13 @@ Restyling an existing render is `tools.look`:
 ```sh
 node tools/frames-dump.js cabinet --n 4 --turn 4 --px1 --out studio/out/frames-cabinet.json
 /usr/bin/python3 tools/look.py --frames studio/out/frames-cabinet.json \
-  --bands 3 --levels 16 --dither bayer-4 --cell-px 8 --outline --outline-mode own
+  --bands 3 --levels 16 --dither bayer-4 --cell-px 8 --palette-mode ramp \
+  --outline --outline-mode own
 ```
+
+`--palette-mode ramp` snaps every cell inside its own material ramp (the diorama's own
+ramps, dumped by `frames-dump.js`), so no colour crosses materials; `--palette-mode global`
+keeps the old single-lattice behaviour.
 
 `--outline-mode own` makes each edge a lattice step darker than its own colour
 (the reference look). `--outline-mode ink` keeps the older single-colour outline.

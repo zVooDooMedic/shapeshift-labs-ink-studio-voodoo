@@ -154,6 +154,11 @@ const view = (extra) =>
   );
 
 const id = pos[0];
+/* Ramps are ground truth for the palette law: the builder registers every ramp a diorama is
+   shaded on into globalThis.INK_RAMPS (see cli/ink-studio.js ramps()). Set it before the build
+   so the dump carries the material ramps alongside the pixels — tools/look.py snaps to those
+   instead of guessing hue clusters from the frame. */
+globalThis.INK_RAMPS = new Map();
 const w = build(id);
 const times = opt.times !== undefined ? list('times') : Array.from({ length: num('n', 8) }, (_, i) => +(num('from', 0) + ((num('to', 6) - num('from', 0)) * i) / Math.max(1, num('n', 8) - 1)).toFixed(3));
 // render.js takes an ABSOLUTE yaw in radians (there is no yawOffset option)
@@ -186,5 +191,10 @@ for (const t of times) {
 }
 const out = path.resolve(opt.out || path.join(ROOT, 'studio/out/frames-' + id + '.json'));
 fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, JSON.stringify({ id: w.id, name: w.name, w: frames[0].w, h: frames[0].h, px: frames[0].px, n: frames.length, frames }));
-console.log('wrote', out, frames.length, 'frames', frames[0].w + 'x' + frames[0].h, 'px', frames[0].px);
+/* material ramps, collected by the build: [{idx: [palette indices], dabs: count}] most used first */
+const ramps = [...(globalThis.INK_RAMPS || new Map()).entries()]
+  .sort((a, b) => b[1] - a[1])
+  .map(([idx, dabs]) => ({ idx: Array.from(idx), dabs }));
+const pal = (w.pal || []).map((c) => '#' + c.toString(16).padStart(6, '0'));
+fs.writeFileSync(out, JSON.stringify({ id: w.id, name: w.name, w: frames[0].w, h: frames[0].h, px: frames[0].px, n: frames.length, pal, ramps, frames }));
+console.log('wrote', out, frames.length, 'frames', frames[0].w + 'x' + frames[0].h, 'px', frames[0].px, 'ramps', ramps.length);

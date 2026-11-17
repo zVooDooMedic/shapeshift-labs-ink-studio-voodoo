@@ -41,7 +41,7 @@ The target look, as the owner describes it:
 | 02 | [Shapes in code](02-shapes-in-code.md) | authoring form as code, not a model | **built** — scenes are dab code; `llm-author.js` writes them |
 | 03 | [Bake the light](03-bake-the-light.md) | light that survives quantisation | **built** — per-dab colour, `--bounce` |
 | 04 | [Render small](04-render-small.md) | why 4 spp at low internal res is the anti-alias trick | **partial** — `frames-dump --w/--h` sets internal res; no explicit spp knob (splat scan, not ray march) |
-| 05 | [Squash and snap](05-squash-and-snap.md) | the downsample *is* the pixel grid | **split** — squash + global lattice snap are built (`look.py --cell-px` + `--levels`); **per-material ramp snap is not built** — the law is documented, the enforcement is the next job |
+| 05 | [Squash and snap](05-squash-and-snap.md) | the downsample *is* the pixel grid; ramp membership, not colour count | **built** — squash + global lattice snap (`--cell-px`, `--levels`), and **per-material ramp snap** via `--palette-mode ramp` (14-19% palette contraction at `on-lattice 1.000`) |
 | 06 | [Edge and upscale](06-edge-and-upscale.md) | own-colour ink, integer nearest upscale | **built 2026-11-17** — `--outline-mode own` |
 
 ## The loop
@@ -56,6 +56,7 @@ Run the whole loop on a scene in one command:
 
 ```bash
 bash tutorials/drill.sh cabinet        # any scene id: scenes | watcher | burn | idol | bench | stuff | cabinet
+bash tutorials/drill.sh cabinet 8 global   # third arg = palette mode (ramp is default)
 ```
 
 It dumps frames, restyles them, writes `contact.png` / `zoom.png`, and prints a
