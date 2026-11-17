@@ -53,6 +53,28 @@ def scene_rows(scene, repo=REPO):
 
 def to_splats(d, flip=True, scale_mul=1.0):
     A = np.array(d["rows"], np.float64)
+    # Drop dead splats BEFORE anything else. ink-studio parks unused dabs (the
+    # dust/streak slots) at a far Y with density 0. The old clamp below turned
+    # those into 5%-opacity points 50 units away, which stretched the subject
+    # bounds and made every auto-fit frame useless.
+    alive = A[:, 3] > 1e-4
+    dropped = int((~alive).sum())
+    if dropped:
+        A = A[alive]
+        print("  dropped %d dead splats (density 0, parked far)" % dropped)
+    # Drop geometric outliers. The rig parks a few guide splats on a debug axis
+    # (this scene: 22 points at x=z=0 running y=3..50). They are opaque, so the
+    # density filter above does not catch them, and a single one 48 units away
+    # stretches the subject bounds so every auto-fit framing is ruined.
+    # Robust rule: anything beyond 3x the 95th-percentile radius is not the subject.
+    med = np.median(A[:, 0:3], axis=0)
+    rad = np.linalg.norm(A[:, 0:3] - med, axis=1)
+    lim = max(float(np.percentile(rad, 95)) * 3.0, 1e-6)
+    far = rad > lim
+    nfar = int(far.sum())
+    if nfar:
+        A = A[~far]
+        print("  dropped %d outlier splats beyond %.2f units of the subject centre" % (nfar, lim))
     P = A[:, 0:3].copy()
     C = np.stack([np.stack([A[:, 4], A[:, 5], A[:, 6]], -1),
                   np.stack([A[:, 5], A[:, 8], A[:, 9]], -1),
