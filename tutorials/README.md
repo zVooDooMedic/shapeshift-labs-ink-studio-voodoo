@@ -41,7 +41,7 @@ The target look, as the owner describes it:
 | 02 | [Shapes in code](02-shapes-in-code.md) | authoring form as code, not a model | **built** — scenes are dab code; `llm-author.js` writes them |
 | 03 | [Bake the light](03-bake-the-light.md) | light that survives quantisation | **built** — per-dab colour, `--bounce` |
 | 04 | [Render small](04-render-small.md) | why 4 spp at low internal res is the anti-alias trick | **partial** — `frames-dump --w/--h` sets internal res; no explicit spp knob (splat scan, not ray march) |
-| 05 | [Squash and snap](05-squash-and-snap.md) | the downsample *is* the pixel grid | **built** — `look.py --cell-px` + `--levels` |
+| 05 | [Squash and snap](05-squash-and-snap.md) | the downsample *is* the pixel grid | **split** — squash + global lattice snap are built (`look.py --cell-px` + `--levels`); **per-material ramp snap is not built** — the law is documented, the enforcement is the next job |
 | 06 | [Edge and upscale](06-edge-and-upscale.md) | own-colour ink, integer nearest upscale | **built 2026-11-17** — `--outline-mode own` |
 
 ## The loop
