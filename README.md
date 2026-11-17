@@ -7,6 +7,7 @@ The package includes geometry, materials, lighting, animation, character control
 ## Contents
 
 - [Install and run](#install-and-run)
+- [Tutorials — training the pixel look](#tutorials--training-the-pixel-look)
 - [First sculpted scene](#first-sculpted-scene)
 - [Using the library in Node](#using-the-library-in-node)
 - [Scene lifecycle and splat data](#scene-lifecycle-and-splat-data)
@@ -54,6 +55,42 @@ npx ink-studio render watcher --colored
 The installed package is named `@shapeshift-labs/ink-studio`; its executable remains `ink-studio`. A private Git repository install requires Git access to that repository. The `private` setting prevents accidental registry publication.
 
 Generated pictures normally go into `studio/out/`. Image baselines go into `studio/snaps/`. Use `--out file.png` for an explicit output path, or configure the directories with `ink-studio.config.js`.
+
+## Tutorials — training the pixel look
+
+`tutorials/` is a six-lesson course in seeing why a pixel render looks wrong, and
+then having the knob to fix it. It is written against this repo: every lesson
+runs real commands and quotes real numbers, and each one names which part is
+built and which is still a target.
+
+```sh
+bash tutorials/drill.sh cabinet      # one full loop: render -> restyle -> measure
+```
+
+| Lesson | Trains |
+|---|---|
+| [01 — see the lattice](tutorials/01-see-the-lattice.md) | measuring a render before judging it |
+| [02 — shapes in code](tutorials/02-shapes-in-code.md) | form from distance functions, never a model |
+| [03 — bake the light](tutorials/03-bake-the-light.md) | light that survives quantisation |
+| [04 — render small](tutorials/04-render-small.md) | 4 samples per pixel, and why the grid is declared early |
+| [05 — squash and snap](tutorials/05-squash-and-snap.md) | 2×2 squash **is** the pixel grid; ramp membership, not colour count |
+| [06 — edge and upscale](tutorials/06-edge-and-upscale.md) | own-colour ink, integer nearest upscale |
+
+Start at [tutorials/README.md](tutorials/README.md). The reference frames the
+lessons were written from are in `tutorials/refs/`.
+
+Restyling an existing render is `tools.look`:
+
+```sh
+node tools/frames-dump.js cabinet --n 4 --turn 4 --px1 --out studio/out/frames-cabinet.json
+/usr/bin/python3 tools/look.py --frames studio/out/frames-cabinet.json \
+  --bands 3 --levels 16 --dither bayer-4 --cell-px 8 --outline --outline-mode own
+```
+
+`--outline-mode own` makes each edge a lattice step darker than its own colour
+(the reference look). `--outline-mode ink` keeps the older single-colour outline.
+Note that `ink` mode is a no-op wherever `scipy` is absent, because
+`render_pixel.add_outline` needs it; `own` mode is numpy-only and always fires.
 
 The examples below use `npx ink-studio` from a consuming project. In this checkout, replace that prefix with `node cli/ink-studio.js`.
 

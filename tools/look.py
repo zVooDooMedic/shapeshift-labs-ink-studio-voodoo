@@ -52,6 +52,40 @@ def metrics(arr01):
     return m
 
 
+def inner_edge(mask, threshold=0.5):
+    """1px inner silhouette edge, numpy only.
+
+    render_pixel.add_outline needs scipy and silently returns the image untouched when scipy is
+    missing — which is the case on this machine's system python, so the ink pass was a no-op here.
+    Same semantics (solid pixels with at least one non-solid 4-neighbour), no dependency.
+    """
+    solid = mask > threshold
+    if not solid.any():
+        return solid
+    er = solid.copy()                      # erode by one pixel in 4 directions
+    er[1:, :] &= solid[:-1, :]
+    er[:-1, :] &= solid[1:, :]
+    er[:, 1:] &= solid[:, :-1]
+    er[:, :-1] &= solid[:, 1:]
+    return solid & ~er
+
+
+def outline_own(im, msk, levels, steps=1):
+    """Edge pixels become a darker shade of their OWN colour, snapped to the lattice below.
+
+    The reference look has no universal ink colour: each material's edge is one ramp step down
+    from its own fill. Snapping to the lattice step (not an arbitrary multiply) keeps the frame
+    on-lattice afterwards, which the audit checks.
+    """
+    inner = inner_edge(msk)
+    out = im.copy()
+    if inner.any():
+        step = steps / max(1, levels - 1)
+        v = np.clip(im[inner] - step, 0.0, 1.0)
+        out[inner] = np.round(v * (levels - 1)) / (levels - 1)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", required=True, help="JSON from tools/frames-dump.js")
@@ -65,6 +99,11 @@ def main():
     ap.add_argument("--outline", action="store_true", default=True)
     ap.add_argument("--no-outline", dest="outline", action="store_false")
     ap.add_argument("--outline-color", default="12,12,20")
+    ap.add_argument("--outline-mode", default="own", choices=["own", "ink"],
+                    help="own = edge is a darker shade of its own colour (the reference look);\n"
+                         "ink = one universal outline colour (render_pixel's add_outline look)")
+    ap.add_argument("--outline-steps", type=int, default=1,
+                    help="how many lattice steps darker an 'own' outline sits")
     ap.add_argument("--target", type=int, default=600, help="nearest-upscale long edge (no AA)")
     ap.add_argument("--bg-threshold", type=float, default=0.12, help="distance from modal border colour")
     ap.add_argument("--zoom", type=int, default=3)
@@ -84,6 +123,7 @@ def main():
         "levels": args.levels, "bands": args.bands, "contrast": args.contrast,
         "dither": args.dither, "dither_strength": args.dither_strength,
         "outline": args.outline, "outline_color": args.outline_color, "target": args.target,
+        "outline_mode": args.outline_mode, "outline_steps": args.outline_steps,
         "cell": args.cell},
         "frames": []}
     strips_raw, strips_look, zoom_raw, zoom_look = [], [], [], []
@@ -102,7 +142,11 @@ def main():
         step2, pal = quantize_lattice(step1, mask, levels=args.levels,
                                       dither=args.dither, dither_strength=args.dither_strength)
         def ink(im, msk):
-            return add_outline(im, msk, color=oc) if args.outline else im
+            if not args.outline:
+                return im
+            if args.outline_mode == "ink":
+                return add_outline(im, msk, color=oc)     # no-op when scipy is absent
+            return outline_own(im, msk, args.levels, args.outline_steps)
 
         # The studio draws in dab blocks of fr["px"] screen pixels. To land on OUR lattice canvas we
         # vote the quantised frame down to a cell at least as big as a dab (cell_px), snap each cell to
