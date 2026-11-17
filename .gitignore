@@ -3,3 +3,5 @@ studio/out/
 node_modules/
 .validation/
 studio/snaps/
+__pycache__/
+tools/generated/
