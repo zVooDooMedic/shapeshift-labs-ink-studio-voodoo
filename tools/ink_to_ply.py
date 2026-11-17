@@ -132,15 +132,62 @@ def write_ply(path, s, sh_degree=0):
     return n
 
 
+def densify(s, k, reach=1.6):
+    """Subdivide every dab into k*k sub-dabs laid on its own tangent plane.
+
+    Why: ink-studio sizes its dabs for a FIXED camera. That is correct for a 2D
+    look and wrong for a free camera — a 2-unit figure carries ~1.4k dabs, the
+    proven SDF sampler carries ~116k for the same subject, and the 85x gap only
+    shows up once you orbit (holes read as missing anatomy). Subdividing keeps
+    the authored form, palette and normals exactly as they are and only raises
+    point density, which is the actual variable.
+
+    Each sub-dab: same orientation, same colour, same opacity; position jittered
+    inside an ellipse of radius `reach` sigma on the dab's own plane; size scaled
+    by 1/k so neighbours overlap by about one sigma.
+    """
+    if k <= 1:
+        return s
+    P, S, R = s["positions"], s["scales"], s["rotations"]
+    # quaternion -> rotation matrix (columns are the dab's local x, y, z axes)
+    w, x, y, z = R[:, 0], R[:, 1], R[:, 2], R[:, 3]
+    ax = np.stack([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)], 1)
+    ay = np.stack([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)], 1)
+    grid = (np.arange(k) + 0.5) / k * 2.0 - 1.0
+    gx, gy = (a.ravel() for a in np.meshgrid(grid, grid))
+    keep = (gx * gx + gy * gy) <= 1.0 + (1.0 / k)      # ellipse mask, edge-safe
+    gx, gy = gx[keep], gy[keep]
+    m = gx.size
+    off = (gx[None, :, None] * S[:, 0, None, None] * reach * ax[:, None, :]
+           + gy[None, :, None] * S[:, 1, None, None] * reach * ay[:, None, :])
+    n = P.shape[0]
+    out = {
+        "positions": (P[:, None, :] + off).reshape(n * m, 3).astype(np.float32),
+        "scales": np.repeat(np.stack([S[:, 0] * (reach / k),
+                                      S[:, 1] * (reach / k),
+                                      S[:, 2]], 1), m, axis=0).astype(np.float32),
+        "rotations": np.repeat(R, m, axis=0).astype(np.float32),
+        # keep total coverage: m smaller dabs must not fade the surface out
+        "opacities": np.repeat(np.clip(s["opacities"] * (1.0 + 0.05 * k), 0.05, 0.999), m, axis=0).astype(np.float32),
+        "colors": np.repeat(s["colors"], m, axis=0).astype(np.float32),
+        "normals": np.repeat(s["normals"], m, axis=0).astype(np.float32),
+    }
+    print("  densified x%d: %d -> %d splats (%.1f per dab)" % (k, n, n * m, m))
+    return out
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("scene")
     ap.add_argument("out")
     ap.add_argument("--scale", type=float, default=1.0)
+    ap.add_argument("--densify", type=int, default=1,
+                    help="subdivide each dab into k*k sub-dabs (1 = off; 8-16 for free-camera 3D)")
     ap.add_argument("--no-flip", action="store_true")
     a = ap.parse_args()
     d = scene_rows(a.scene)
     s = to_splats(d, flip=not a.no_flip, scale_mul=a.scale)
+    s = densify(s, a.densify)
     n = write_ply(a.out, s)
     P, S = s["positions"], s["scales"]
     print(f"{os.path.basename(a.scene)} -> {a.out}: {n} splats, {os.path.getsize(a.out)} bytes")
