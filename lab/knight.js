@@ -10,6 +10,7 @@ module.exports = kit => {
   const CLIP_AT = 0.2;
   const ATK_PERIOD = process.env.KNIGHT_PERIOD ? +process.env.KNIGHT_PERIOD : 0.25 + 0.62;
   const FACE = process.env.KNIGHT_FACE ? +process.env.KNIGHT_FACE : 0.8;
+  const MOVING = !!process.env.KNIGHT_MOVE;
   return {
     id: 'knight',
     name: 'PixelHard Knight',
@@ -30,6 +31,7 @@ module.exports = kit => {
         speed: 2.4,
         atk: process.env.KNIGHT_ATK || 'slash',
         gait: 'walk',
+        legs: { r0: 0.075, r1: 0.062, mat: [3, 4, 5], foot: [0.115, 0.062, 0.15], footMat: [2, 3, 4] },
         // the rig's own dressing: a ring under the feet reads as a stage prop and
         // the built-in smear/streak is opaque enough to eat the silhouette.
         rings: false,
@@ -48,12 +50,9 @@ module.exports = kit => {
         },
         sculpt(S, T) {
           if (process.env.KNIGHT_NOSCULPT) return;
-          // legs
-          S.box([-0.10, 0.55, 0], [0.085, 0.46, 0.095], { r: [3, 4, 5] }, T('legL'));
-          S.box([0.10, 0.55, 0], [0.085, 0.46, 0.095], { r: [3, 4, 5] }, T('legR'));
-          // boots
-          S.box([-0.11, 0.07, 0.04], [0.10, 0.075, 0.145], { r: [2, 3, 4] }, T('legL'));
-          S.box([0.11, 0.07, 0.04], [0.10, 0.075, 0.145], { r: [2, 3, 4] }, T('legR'));
+          // legs are NOT sculpted: the rig builds and animates them from spec.legs
+          // (SOCK->ANK tubes + foot balls). Static boxes here cover the walk swing and
+          // were the reason the gait read as a frozen block.
           // tabard / skirt
           // tabard: a boxed skirt, NOT a lathe — a flared lathe here renders as a
           // red mushroom base and reads as a stage prop, not a garment.
@@ -110,7 +109,7 @@ module.exports = kit => {
             played = true;
             ch.play(CLIP === 'death' ? 'defeat' : CLIP, { unit: CLIP === 'death' ? 1 : 1 });
           }
-          ch.update(dt, { move: 0, mz: 0, run: false, attack: attacking, face: FACE }, t);
+          ch.update(dt, { move: MOVING ? 1 : 0, mz: MOVING ? 1 : 0, run: false, attack: attacking, face: FACE }, t);
         }
       };
       for (let i = 0; i < 45; i++) W.anim.update(1 / 60, 0);
