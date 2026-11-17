@@ -56,13 +56,20 @@ module.exports = kit => {
           // tabard / skirt
           // tabard: a boxed skirt, NOT a lathe — a flared lathe here renders as a
           // red mushroom base and reads as a stage prop, not a garment.
-          S.box([0, 0.86, 0], [0.145, 0.17, 0.125], { r: [16, 16, 17] }, T('hem'));
+          S.box([0, 0.86, 0], [0.145, 0.17, 0.17], { r: [16, 16, 17] }, T('hem'));
           S.box([0, 1.02, 0], [0.165, 0.035, 0.14], { r: [20, 21, 22] }, T('chest'));
           // cuirass
           S.ball([0, 1.36, 0], [0.25, 0.29, 0.21], { r: [4, 5, 7] }, T('chest'));
-          // pauldrons
-          S.ball([-0.27, 1.52, 0], 0.125, { r: [5, 7, 9] }, T('chest'));
-          S.ball([0.27, 1.52, 0], 0.125, { r: [5, 7, 9] }, T('chest'));
+          // pauldrons — ellipsoids, not balls: a sphere of r=0.125 collapses the
+          // profile silhouette (the figure reads paper-thin at 90 degrees). Depth
+          // 0.17 keeps the "heavy plate" mass from the side without widening the
+          // front silhouette, which is already correct.
+          S.ball([-0.27, 1.52, 0], [0.125, 0.135, 0.17], { r: [5, 7, 9] }, T('chest'));
+          S.ball([0.27, 1.52, 0], [0.125, 0.135, 0.17], { r: [5, 7, 9] }, T('chest'));
+          // back plate: profile mass behind the cuirass, and it shades the lower back
+          S.box([0, 1.30, -0.19], [0.17, 0.20, 0.045], { r: [3, 4, 6] }, T('chest'));
+          // forward chest lip: catches the key light, gives the side view a front edge
+          S.box([0, 1.30, 0.19], [0.15, 0.16, 0.035], { r: [6, 8, 10] }, T('chest'));
           // helmet: bascinet dome + visor slot + crest
           S.ball([0, 1.74, 0], [0.145, 0.165, 0.145], { r: [7, 9, 11] }, T('head'));
           S.box([0, 1.72, 0.13], [0.105, 0.02, 0.02], { r: [1, 2, 3] }, T('head'));

@@ -201,9 +201,13 @@
       WH = MPi(6);
     const NR = rig.length,
       ND = 14,
-      NS = 10,
-      NSL = 16,
-      NBO = 6,
+      // The smear/streak and slash-bolt pools were hard-coded counts, so
+      // `streak:false` / `fx:false` only changed their COLOUR and the geometry
+      // still animated — which is why an attack render came out as a grey cloud
+      // swallowing the blade (critic 5/10). Honour the flag as a count now.
+      NS = (spec.streak === false ? 0 : (typeof spec.streak === 'number' ? spec.streak : 10)),
+      NSL = (spec.fx === false ? 0 : 16),
+      NBO = (spec.fx === false ? 0 : 6),
       RN = rings.reduce((a, r) => a + (r.n || 20), 0);
     for (const r of rig) iso(0, -50, 0, 0.02, P[r.ramp[0]], 3, r.em ? { em: true, nd: true } : undefined);
     for (let i = 0; i < ND + NS; i++)
