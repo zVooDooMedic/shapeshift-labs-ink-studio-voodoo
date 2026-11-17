@@ -707,4 +707,8 @@ node cli/ink-studio.js check watcher
 
 Visual baselines are created explicitly by `snap`; no baseline images are bundled. `check` compares rendered pixels against those baselines. Keep baselines when they provide useful regression evidence; generated previews and the compiled `dist/` bundle can be regenerated.
 
-The package is currently version `0.1.0`, marked private, and has license metadata `UNLICENSED`.
+The package is currently version `0.1.0` and marked private.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
