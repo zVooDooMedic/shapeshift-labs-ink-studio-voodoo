@@ -185,7 +185,11 @@ if __name__ == "__main__":
                     help="subdivide each dab into k*k sub-dabs (1 = off; 8-16 for free-camera 3D)")
     ap.add_argument("--no-flip", action="store_true")
     a = ap.parse_args()
-    d = scene_rows(a.scene)
+    if a.scene.endswith(".json"):
+        with open(a.scene) as fh:
+            d = json.load(fh)          # pre-posed frame buffer from _dump-frames-ply.js
+    else:
+        d = scene_rows(a.scene)
     s = to_splats(d, flip=not a.no_flip, scale_mul=a.scale)
     s = densify(s, a.densify)
     n = write_ply(a.out, s)
