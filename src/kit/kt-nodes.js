@@ -7,13 +7,14 @@
                           function, to cut into), o.at (a point on it), o.n (which way the surface faces there: found if left out), o.up
                           (which way is up in the drawing: [0, 1, 0]), o.depth (0.06), o.mat (the colour of the cut: its own, or left out
                           to keep the stone's). shape: { strokes, width } or outline loops (K.poly2). Raised instead of cut: o.raise
-     S.displace(p, field, amp, o)   a held solid pushed out where field (x, y, z) -> 0..1 (any K.tex pattern) is over o.mid (0.5) and in
-                          where it is under, by up to amp. o.k (0.8) slows the field down where the pattern is steep
+     S.displace(p, field, amp, o)   a held solid pushed out where a field is over o.mid (0.5) and in
+                          where it is under. Supply a (x, y, z) -> 0..1 callback or a K.procedural.fields expression.
+                          o.k (0.8) slows the field down where the pattern is steep.
      S.smooth(p, o)       a held solid (or a list of them, joined) made over on a grid, with signed-distance grid operations:
                           o.fillet: fill every crease and hollow corner with a curve of that radius (where two solids meet, where a
                           rock sits on the ground); o.round: round every edge and corner to that radius; o.mean: passes of blur (soften
-                          everything); o.grow: push the surface out (in, if negative) by that much; o.cell: the grid's
-                          spacing (the solid's res). Outside the grid the solid keeps its own distance.
+                          everything); o.grow: push the surface out (in, if negative) by that much; o.reinitialize: rebuild distance
+                          from subcell crossings; o.cell: the grid's spacing. Outside the grid the solid keeps its own distance.
    K.poly2.text(str, size, o)   a single-stroke font (A-Z 0-9 . , - ' ! ? and space): { strokes, width } with capitals `size` tall,
                           centred. o.width (size * 0.16), o.gap (between letters), o.line (between lines, for '\n')
    K.poly2.runes(n, size, seed, o)   n runes in a row: a stave and its branches, each different, the same for the same seed
@@ -260,15 +261,43 @@
     };
     /* made a true distance again (fast sweeping): the values beside the surface are kept, and every other is worked out from them as
        the shortest way to the surface, sweeping the grid in all eight directions */
-    g.redistance = () => {
+    g.redistance = ({ subcell = false, passes = 1 } = {}) => {
+      if (typeof subcell !== 'boolean' || !Number.isSafeInteger(passes) || passes < 1 || passes > 8)
+        throw new Error('SDF reinitialization needs one to eight sweep passes');
       const N = v.length,
         u = new Float32Array(N),
         fixed = new Uint8Array(N),
         BIG = 1e9;
+      let seeds = 0;
+      function crossing(i, position, count, stride) {
+        const d = v[i], absolute = Math.abs(d);
+        let nearest = Infinity;
+        if (position > 0 && (v[i - stride] < 0) !== (d < 0))
+          nearest = h * absolute / (absolute + Math.abs(v[i - stride]));
+        if (position < count - 1 && (v[i + stride] < 0) !== (d < 0))
+          nearest = Math.min(nearest, h * absolute / (absolute + Math.abs(v[i + stride])));
+        return nearest;
+      }
       for (let k = 0, i = 0; k < nz; k++)
         for (let j = 0; j < ny; j++)
           for (let a = 0; a < nx; a++, i++) {
             const s = v[i] < 0;
+            if (subcell) {
+              if (!Number.isFinite(v[i])) throw new Error('SDF samples must be finite for reinitialization');
+              if (v[i] === 0) {
+                fixed[i] = 1;
+                seeds++;
+                continue;
+              }
+              const x = crossing(i,a,nx,1), y = crossing(i,j,ny,nx), z = crossing(i,k,nz,nx*ny),
+                precision = (1 / x) ** 2 + (1 / y) ** 2 + (1 / z) ** 2;
+              if (precision) {
+                fixed[i] = 1;
+                seeds++;
+                u[i] = 1 / Math.sqrt(precision);
+              } else u[i] = BIG;
+              continue;
+            }
             let edge = false;
             if (a > 0 && v[i - 1] < 0 !== s) edge = true;
             else if (a < nx - 1 && v[i + 1] < 0 !== s) edge = true;
@@ -281,8 +310,9 @@
               u[i] = Math.min(Math.abs(v[i]), h);
             } else u[i] = BIG;
           }
+      if (subcell && !seeds) return g;
       const h2 = h * h;
-      for (let sw = 0; sw < 8; sw++) {
+      for (let sw = 0; sw < 8 * passes; sw++) {
         const dx = sw & 1 ? -1 : 1,
           dy = sw & 2 ? -1 : 1,
           dz = sw & 4 ? -1 : 1;
@@ -312,6 +342,7 @@
       for (let i = 0; i < N; i++) v[i] = v[i] < 0 ? -u[i] : u[i];
       return g;
     };
+    g.reinitialize = ({ passes = 2 } = {}) => g.redistance({ subcell: true, passes });
     g.fillet = r => g.offset(r).redistance().offset(-r);
     g.round = r => g.offset(-r).redistance().offset(r);
     return g;
@@ -437,16 +468,22 @@
     S.displace = (p0, field, amp, o) => {
       o = o || {};
       const mid = o.mid === undefined ? 0.5 : o.mid,
-        k = o.k || 0.8;
+        k = o.k || 0.8,
+        evaluate = typeof field === 'function'
+          ? field
+          : K.procedural.fields.compile({ type: 'clamp', source: field }, { seed: o.seed ?? 0 });
       const p = {
         bc: p0.bc,
         br: p0.br + amp,
-        sd: (x, y, z) => (S.psd(p0, x, y, z) - 2 * amp * (field(x, y, z) - mid)) * k,
+        sd: (x, y, z) => (S.psd(p0, x, y, z) - 2 * amp * (evaluate(x, y, z) - mid)) * k,
         sample(f) {
           const keep = p0.res;
           p0.res = this.res;
-          p0.sample(f);
-          p0.res = keep;
+          try {
+            p0.sample(f);
+          } finally {
+            p0.res = keep;
+          }
         }
       };
       if (p0.along) p.along = p0.along;
@@ -476,6 +513,7 @@
       if (o.fillet) g.fillet(o.fillet);
       if (o.round) g.round(o.round);
       if (o.mean) g.mean(o.mean).redistance();
+      if (o.reinitialize) g.reinitialize(typeof o.reinitialize === 'object' ? o.reinitialize : {});
       if (o.grow) g.offset(o.grow);
       const inBox = (x, y, z) =>
         x > lo[0] + cell &&

@@ -33,6 +33,7 @@ for (let i = 1; i < argv.length; i++) {
 const num = (k, d) => (opt[k] === undefined ? d : +opt[k]),
   list = (k, d) => (opt[k] === undefined ? d : String(opt[k]).split(',').map(Number));
 let A = null;
+const importedAssets = new Map();
 const lib = () => A || (A = cfg.load ? cfg.load() : require('../index.js').load());
 // a diorama by its id, or a file in lab/ that exports (kit) => ({ id, name, seed, build })
 /* a mesh file is a diorama too: fitted to --size, coloured from its own materials, baked and looked at like the rest */
@@ -45,8 +46,18 @@ function meshScene(file) {
     name: path.basename(file),
     seed: 1,
     build(seed) {
-      const size = num('size', 6),
-        mesh = K.mesh.fit(raw, { size, up: opt.up, turn: num('spin', 0) }),
+      const size = num('size', 6);
+      const asset = importedAssets.get(path.resolve(file));
+      if (asset) {
+        const world = K.authoring.assetSurfaces.world(asset, {
+          size, res: num('res', size / 70), turn: num('spin', 0), up: opt.up,
+          hues: num('hues', 10), shades: num('shades', 5), geometry: opt.geometry,
+          cells: num('cells', 64), thick: opt.thick === undefined ? undefined : +opt.thick,
+          resolution: opt.resolution === undefined ? undefined : +opt.resolution
+        });
+        return world;
+      }
+      const mesh = K.mesh.fit(raw, { size, up: opt.up, turn: num('spin', 0) }),
         look = K.mesh.look(mesh, { hues: num('hues', 6), shades: num('shades', 4) }),
         B = kit.makeBuilder(seed, look.pal),
         S = K.sculpt(kit.makeSculpt(B));
@@ -97,7 +108,8 @@ function scene(id) {
   if (!s) die('no diorama called "' + id + '"');
   return s;
 }
-function build(id) {
+const paintDirectory = id => path.resolve(CWD, opt.dir || path.join(cfg.paint || 'studio/paint', id));
+function build(id, seedOverride) {
   if (opt.focus) {
     const f = list('focus'); // uneven detail: x,y,z then near, far, coarse
     globalThis.INK_FOCUS = { p: [f[0] || 0, f[1] || 0, f[2] || 0], near: f[3], far: f[4], coarse: f[5] };
@@ -109,9 +121,25 @@ function build(id) {
         : { stretch: +String(opt.follow).split(',')[0], broad: +String(opt.follow).split(',')[1] || undefined };
   if (opt.bounce) globalThis.INK_BOUNCE = true; // bounce light: every dab is also lit by the lit things round it
   if (opt.fine) globalThis.INK_FINE = true; // inked detail: dabs are baked with a tile of the surface under them
-  const s = scene(id),
-    t0 = Date.now(),
-    w = s.build(opt.seed === undefined ? s.seed : +opt.seed);
+  const s = scene(id);
+  // Load paint by scene ID so rendering the same file from another path finds its decals.
+  const decalFile = path.join(paintDirectory(s.id), 'decals.json');
+  globalThis.INK_DECAL_NEXT = fs.existsSync(decalFile)
+    ? JSON.parse(fs.readFileSync(decalFile, 'utf8')).decals
+    : (globalThis.INK_PAINT || {})[s.id] || null;
+  const t0 = Date.now(),
+    seed = seedOverride ?? (opt.seed === undefined ? s.seed : +opt.seed);
+  const controls = opt.params ? JSON.parse(String(opt.params)) : undefined;
+  const snapshot = opt.authoring ? JSON.parse(fs.readFileSync(path.resolve(opt.authoring), 'utf8')) : undefined;
+  let w = s.build(seed, { controls, snapshot });
+  if (s.animate) w = s.animate(w, seed) || w; // a diorama in two halves: what stands, then what sets it moving
+  if (w.sandbox && !w.anim) lib().KIT.sandbox.attach(w); // and one whose stuff is a sandbox gets its grid going
+  if (w.pix && lib().KIT.pixel)
+    ((w.pixTex = lib().KIT.pixel.evaluators(w)),
+      (w.pixCell = lib().KIT.pixel.CELL),
+      (w.pixView = lib().KIT.pixel.VIEW),
+      (w.pixUnfold = lib().KIT.pixel.unfold),
+      (w.pixAnchors = lib().KIT.pixel.anchors)); // (colour per pixel: its patterns, to be called for each pixel; where edge sprites stand)
   w.buildMs = Date.now() - t0;
   w.id = s.id;
   w.name = s.name;
@@ -176,6 +204,9 @@ function pose(w, t) {
     });
   }
 }
+const artPixelSize = cmd === 'compare' || cmd === 'review' ? undefined : num('px', undefined);
+if (artPixelSize !== undefined && (!Number.isSafeInteger(artPixelSize) || artPixelSize < 1))
+  die('--px needs a positive integer');
 const view = extra =>
   Object.assign(
     {
@@ -185,10 +216,30 @@ const view = extra =>
       target: opt.target ? list('target') : undefined,
       w: num('w', 900),
       h: num('h', 620),
+      px: artPixelSize,
+      stable: opt.stable === 'off' ? false : opt.snap || opt['dither-space'] || opt.resolve || opt.stable ? {
+        snap: opt.snap === 'on' || opt.snap === true || (opt.snap !== 'off' && !!opt.stable),
+        ...(opt['dither-space'] && { dither: opt['dither-space'] }),
+        ...(opt.resolve && { resolve: opt.resolve })
+      } : undefined,
+      artEffects: opt.effects === 'off' ? false : opt.effects,
+      ink: opt.ink === 'off' ? false : opt.ink,
+      tone: opt.tone === 'off' ? false : opt.tone,
       raw: !!opt.raw,
       colored: !!opt.colored,
+      splatOrder: opt['splat-order'],
       fine: !!opt.fine,
-      clean: !!opt.clean
+      clean: !!opt.clean,
+      ortho: !!opt.ortho,
+      surface: opt.surface === 'off' ? false : undefined,
+      reflections: opt.reflections === 'off' ? false : undefined,
+      atmosphere: opt.atmosphere === 'off' ? false : undefined,
+      volumeQuality: opt['volume-scale'] || opt['volume-steps'] || opt['volume-jitter'] ? {
+        ...(opt['volume-scale'] && { scale: num('volume-scale') }),
+        ...(opt['volume-steps'] && { steps: num('volume-steps') }),
+        ...(opt['volume-jitter'] && { jitter: opt['volume-jitter'] })
+      } : undefined,
+      edges: opt.edges === 'off' ? false : undefined
     },
     extra
   );
@@ -199,6 +250,15 @@ const save = (name, img) => {
   console.log('wrote', f, img.w + 'x' + img.h);
   return f;
 };
+const asciiFrame = (image, world) => lib().KIT.ascii.draw(image, {
+  set: opt.text === true ? 'ascii' : opt.text,
+  g: num('tg', 2),
+  px: opt.px1 ? 1 : image.px,
+  colour: opt.tcolour || 'scene',
+  pal: image.palette || world.pal
+});
+const displayFrame = (image, world) => opt.text ? asciiFrame(image, world) : R.upscale(image, opt.px1 ? 1 : image.px);
+const textSidecar = file => file.replace(/\.(?:a?png)$/i, '') + '.txt';
 const times = () =>
   opt.t !== undefined
     ? list('t')
@@ -220,28 +280,69 @@ const CMD = {
         '  scenes                      list every diorama',
         '  catalog [words]             what the toolkit can do, searchable',
         '  stats <id>                  splat counts, colours used, size, cost per frame, warnings',
-        '  render <id> [--t 1.5]       one picture, drawn the way the page draws it',
+        '  render <id> [--t 1.5]       one PNG rendered on the CPU',
         '  ramps <id> [--n 12]         the ramps it is shaded on, and which only get darker without turning; a turning one is offered from the same palette',
         '  values <id> [--t 1.5]       the value check: the picture sorted into dark, middle and light, and whether it reads in three tones',
         '  sheet <id> [--from 0 --to 6 --n 12 | --t 0,1,2]   the same view at several moments, on one sheet',
         '  turn <id> [--n 8] [--t 0]   the diorama from all round, on one sheet',
-        '  clip <id> [--from 0 --to 6 --fps 12]   an animated PNG of it moving',
+        '  clip <id> [--from 0 --to 6 --fps 12]   an animated PNG of it moving (also supports --text)',
         '  ghost <id> [--t 2 --spacing 0.12 --n 2 | --ghosts 1.6,1.8]   one moment with those either side laid faintly over it',
         '  acts                        the ready clips, reactions, easings and cues, by name',
         '  motion <id> [--from 0 --to 12]   numbers about how it moves: speed, jumps, what goes underground',
-        '  mesh <file.obj|.gltf|.glb>  bring a mesh in: what it is made of, and a sheet of it from all round as splats',
+        '  mesh <file.obj|.gltf|.glb>  import and inspect as splats (--uv requires textured GLB stamps, --uv off uses geometry)',
+        '  export-glb <scene.js|.json|.obj|.gltf|.glb> --out model.glb   write UV-mapped geometry with materials, skins and clips',
+        '                              [--res 0.08 --texture-size 1024 --triangles 16000 --duration 4 --fps 30]',
+        '  depth <map.png|map.json> [--image aligned.png --out-dir folder]  import a depth map as splats, a mesh and an SDF',
         '                              [--size 6 --cells 64 --res 0.09 --hues 6 --shades 4 --up z --spin 0.5 --thick 0.1]; a mesh file also works wherever an id does',
         '  validate <file.json>        check a diorama written as data: every mistake listed, with what was probably meant',
         '                              a .json diorama also works wherever an id does; --style slate|moss|ember puts it in another style',
-        '  perf <id> [--secs 5 --fps 60]   what a frame costs: time to work out, bytes sent to the graphics card',
+        '  perf <id> [--secs 5 --fps 60]   CPU animation time and estimated graphics upload bytes',
         '  selftest                    every lab module checked in numbers, and the lab dioramas run for a while',
         '  snap <id|all> [--t 0,2]     keep reference pictures',
         '  check [id ...]              draw again and compare with the reference pictures',
+        '  render <id> [--text ascii|symbols|braille|blocks --tg 2 --tcolour scene|ink|mono]  drawn as text, with the characters as <id>.txt',
+        '  compare <id> <ref.png> [--px 2 --colours 32]  a diorama beside a reference at true pixel size, both measured',
+        '  paint export <id> [view options]   a view at true pixel size to paint over (paint.png), with where each pixel lies',
+        '  paint absorb <id> [--png file]     the painted pixels kept as decals pinned to the surface (#ff00ff erases); paint clear <id>',
+        '  lint <id ...> [--map]              pixel-art lint: orphans, doubles, jaggies, banding, pillow shading, noise, colours',
+        '  review <id> [--ref pic --px 2]     a sheet of fixed shots (four sides, top, low, far, near, close), beside the last one',
+        '  variants <id> --seeds 3,7,12 [--group silhouette|openness|wear --motion]  render a ranked seed contact sheet',
+        '  atlas <id> [--directions 8 --w 96 --h 96 --fps 12 --maps depth,normal,emission]  export a transparent sprite atlas',
+        '  passes <id> [--channels coverage,depth,normal,objectId,materialId,emission]  save art-pixel render pass previews',
+        '  shimmer <id> [--mode orbit|zoom|pan|still --frames 24]  how many pixels flicker over a move, and a GIF of it',
+        '  crisp <id ...|all> [--t 2 --map]   how crisp at its own pixel size: stray pixels, specks, flat area, finest frequencies,',
+        '                              against the pixel-art references (--map: where the stray pixels and drawn edges are)',
         '',
         'any command that plays a diorama takes --poke 2:x,y,z (tap it at 2 seconds, toward that point; several with ;)',
-        'view options: --yaw --pitch --zoom 2 --target x,y,z --w 900 --h 620 --raw (no palette) --colored (smooth body-colored contours) --fine (inked detail: colours looked up per pixel) --bounce (bounce light baked in) --focus x,y,z[,near,far,coarse] (uneven detail) --follow [stretch,broad] (dabs along the form) --clean (lone pixels removed) --cols 4 --out file.png --seed n'
+        'view options: --surface off (no finish layers) --reflections off --atmosphere off --edges off (no edge sprites) --yaw --pitch --zoom 2 --target x,y,z --w 900 --h 620 --px 2 (screen pixels per art pixel) --px1 (native art pixels) --tone stipple|off --raw (no palette) --colored (smooth body-colored contours) --fine (inked detail: colours looked up per pixel) --bounce (bounce light baked in) --focus x,y,z[,near,far,coarse] (uneven detail) --follow [stretch,broad] (dabs along the form) --clean (remove lone pixels) --ortho (orthographic: no perspective) --cols 4 --out file.png --seed n',
+        'art options: --ink off --effects off --stable off --snap --dither-space screen|world|object --resolve native|coverage|clusters --splat-order center|surface --volume-scale 2 --volume-steps 8 --volume-jitter off|blue-noise|spatiotemporal'
       ].join('\n')
     );
+  },
+  'export-glb'() {
+    const id = pos[0];
+    if (!id || typeof opt.out !== 'string') die('Usage: ink-studio export-glb <scene.js|.json|mesh> --out model.glb');
+    try {
+      let source = id;
+      if (!/\.(obj|gltf|glb)$/i.test(id)) {
+        const authored = scene(id);
+        if (typeof authored.model !== 'function') die('This scene needs a model(seed, options) hook that exposes its rest geometry');
+        const box = list('bounds');
+        if (box && (box.length !== 6 || !box.every(Number.isFinite))) die('--bounds expects xmin,ymin,zmin,xmax,ymax,zmax');
+        const options = {
+          resolution: num('res', undefined), method: opt.method, targetTriangles: num('triangles', undefined),
+          duration: num('duration', undefined), fps: num('fps', undefined)
+        };
+        if (box) options.bounds = { min: box.slice(0, 3), max: box.slice(3) };
+        source = authored.model(num('seed', authored.seed), options);
+      }
+      const result = require('../index.js').exportGlb(source, {
+        out: opt.out, textureSize: num('texture-size', 1024), uvMargin: num('uv-margin', 0.008)
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      die(error.message);
+    }
   },
   scenes() {
     for (const s of lib().SCENES) console.log(s.id.padEnd(12), s.name.padEnd(20), s.blurb);
@@ -374,7 +475,7 @@ const CMD = {
       pose(w, 0);
     }
     const im = R.render(w, view({})),
-      hexs = w.pal.map(h => '#' + h.toString(16).padStart(6, '0')),
+      hexs = (im.palette || w.pal).map(h => '#' + h.toString(16).padStart(6, '0')),
       tot = im.w * im.h;
     console.log('picture     ' + im.w + ' x ' + im.h + ' art pixels, each ' + im.px + ' screen pixels');
     console.log('colours on screen (share of the picture):');
@@ -395,8 +496,8 @@ const CMD = {
     im.use.forEach((u, i) => {
       if (!u) unused.push(i);
     });
-    if (unused.length > w.pal.length / 3)
-      warn.push(unused.length + ' of ' + w.pal.length + ' colours never show from the default view');
+    if (unused.length > hexs.length / 3)
+      warn.push(unused.length + ' of ' + hexs.length + ' colours never show from the default view');
     console.log(warn.length ? 'warnings:\n  ' + warn.join('\n  ') : 'no warnings');
   },
   render() {
@@ -406,7 +507,63 @@ const CMD = {
     const t0 = Date.now(),
       im = R.render(w, view({ t }));
     console.log('drawn in', Date.now() - t0, 'ms');
+    /* --text [ascii|symbols|braille|blocks]: drawn as text (K.ascii.draw), --tg screen pixels a font pixel (2), --tcolour scene|ink|mono;
+       the characters themselves are written beside it, as <id>.txt */
+    if (opt.text) {
+      const T = asciiFrame(im, w);
+      const f = save(w.id + '.png', T), ft = textSidecar(f); fs.writeFileSync(ft, T.text + '\n'); console.log('wrote', ft); console.log('as text:', T.cols, 'x', T.rows, 'characters');
+      return;
+    }
     save(w.id + '.png', R.upscale(im, opt.px1 ? 1 : im.px));
+  },
+  variants() {
+    const seeds = list('seeds', [3, 7, 12, 19, 22, 27]), group = opt.group || 'silhouette';
+    if (!seeds.length || seeds.length > 48 || !seeds.every(Number.isSafeInteger) ||
+        !['silhouette', 'openness', 'wear'].includes(group))
+      die('variants requires up to 48 integer seeds and a valid grouping dimension');
+    const C = require('./crisp.js'), critic = require('./critic.js');
+    const t = num('t', 0), w = num('w', 104), h = num('h', 82);
+    const results = seeds.map(seed => {
+      const world = build(pos[0], seed);
+      if (!world.variant || !Number.isFinite(world.variant[group])) die('this scene does not publish variant metrics');
+      pose(world, t);
+      const config = view({ t, w, h, px: 1, ortho: true });
+      const shot = R.render(world, config);
+      const { mark, bg, ...lint } = critic.lint(shot, { bg: world.pal[0] });
+      const shimmer = opt.motion ? critic.flicker(Array.from({ length: 8 }, (_, index) =>
+        R.render(world, { ...config, yaw: (config.yaw ?? world.cam.yaw) + index * .006 })), { bg: world.pal[0] }) : undefined;
+      return { seed, shot, data: { ...world.variant, crisp: C.measure(shot, { bg: world.pal[0] }), lint, shimmer } };
+    }).sort((a, b) => a.data[group] - b.data[group] || a.seed - b.seed);
+    const file = save('variants.png', R.grid(results.map(row => R.upscale(row.shot, num('scale', 3))),
+      num('cols', Math.min(3, results.length)), results.map(row => String(row.seed))));
+    const report = file.replace(/\.[^.]+$/, '') + '.json';
+    fs.writeFileSync(report, JSON.stringify({ group, variants: results.map(row => ({ seed: row.seed, ...row.data })) }, null, 2) + '\n');
+    console.log('wrote', report);
+  },
+  atlas() {
+    const w = build(pos[0]);
+    const fps = num('fps', 12), from = num('from', num('t', 0)), to = num('to', from);
+    if (!Number.isFinite(fps) || fps <= 0 || fps > 240 || !Number.isFinite(from) || !Number.isFinite(to) || to < from)
+      die('atlas needs a positive frame rate and an ordered time range');
+    const frames = Math.max(1, Math.ceil((to - from) * fps - 1e-8));
+    if (frames > 512) die('atlas supports up to 512 frames');
+    const times = Array.from({ length: frames }, (_, index) => from + index / fps);
+    const directory = opt.out ? path.resolve(opt.out) : path.join(OUT, w.id + '-atlas');
+    const { spriteAtlas, writeAtlas } = require('./sprite-atlas.js');
+    const atlas = spriteAtlas(w, { width: num('w', 96), height: num('h', 96), directions: num('directions', 8),
+      columns: num('cols', num('directions', 8)), maps: opt.maps ? String(opt.maps).split(',') : [],
+      pivot: opt.pivot ? list('pivot') : w.cam.target, view: view(), yaw: num('yaw', w.cam.yaw), times, fps, pose });
+    writeAtlas(directory, atlas);
+    console.log('wrote', directory, atlas.metadata.frames.length, 'frames');
+  },
+  passes() {
+    const w = build(pos[0]), t = num('t', 0);
+    pose(w, t);
+    const passes = opt.channels ? String(opt.channels).split(',') : true;
+    const im = R.render(w, view({ t, passes }));
+    const directory = opt.out ? path.resolve(opt.out) : path.join(OUT, w.id + '-passes');
+    require('./pass-preview.js').writePasses(directory, im, opt.px1 ? 1 : im.px);
+    console.log('wrote', directory);
   },
   /* the ramps a diorama is shaded on, most used first, and what kind each is: one hue darker and lighter, or turning as it darkens.
      For a one-hue ramp a turning one made from the same palette is offered (the diorama is not changed). */
@@ -465,7 +622,8 @@ const CMD = {
       t = num('t', 0);
     pose(w, t);
     const im = R.render(w, view({ t })),
-      bgc = [(w.pal[0] >> 16) & 255, (w.pal[0] >> 8) & 255, w.pal[0] & 255],
+      bg = (im.palette || w.pal)[0],
+      bgc = [(bg >> 16) & 255, (bg >> 8) & 255, bg & 255],
       n = im.w * im.h,
       lum = new Float32Array(n),
       on = new Uint8Array(n);
@@ -527,13 +685,15 @@ const CMD = {
     if (!opt.quiet) save(w.id + '-values.png', R.grid([R.upscale(im, im.px), R.upscale(out, im.px)], 2));
   },
   sheet() {
+    const artHistory = require('../src/art-effects.js').history({ frames: 24 });
+    const volumeHistory = lib().KIT.atmosphere.history();
     const w = build(pos[0]),
       ts = times(),
       imgs = [];
     for (const t of ts) {
       pose(w, t);
-      const im = R.render(w, view({ t, w: num('w', 600), h: num('h', 420) }));
-      imgs.push(R.upscale(im, im.px));
+      const im = R.render(w, view({ t, artHistory, volumeHistory, w: num('w', 600), h: num('h', 420) }));
+      imgs.push(displayFrame(im, w));
     }
     save(
       w.id + '-sheet.png',
@@ -628,17 +788,20 @@ const CMD = {
         worst.toFixed(1) +
         '), ' +
         (per > 1e6 ? (per / 1e6).toFixed(1) + ' MB' : Math.round(per / 1e3) + ' KB') +
-        ' sent to the graphics card' +
+        ' estimated for graphics uploads' +
         (a.boned ? ' (' + a.boned.length.toLocaleString() + ' splats ride on ' + a.bones.length / 12 + ' bones)' : '')
     );
     console.log(
-      "(the page shows the same for a real device, with sort, draw and the card's own time: Esc menu, or __splat.perf)"
+      '(rendering, sorting, and GPU execution are outside this estimate)'
     );
   },
   validate() {
     if (!pos[0]) die('validate which file?');
     const s = dataScene(pos[0]);
     console.log(pos[0] + ': sound (' + s.id + ', "' + s.name + '")');
+  },
+  depth() {
+    require('./depth.js')(pos[0], opt, lib(), path.join(OUT, 'depth-import'));
   },
   mesh() {
     const w = build(pos[0]),
@@ -648,7 +811,7 @@ const CMD = {
         ' faces, ' +
         m.verts +
         ' points; ' +
-        (m.sheet
+        (m.mode === 'uv' ? (m.geometry === 'sdf' ? 'SDF reconstruction with UV transfer and alpha' : 'UV surface stamps with alpha') : m.sheet
           ? 'open (' + (m.open * 100).toFixed(0) + '% of its edges are loose): treated as a sheet with thickness'
           : 'closed: treated as a solid') +
         '; materials: ' +
@@ -660,8 +823,8 @@ const CMD = {
         m.hues +
         ' colours of ' +
         (w.pal.length - 1) / m.hues +
-        ' shades, field cell ' +
-        m.cell.toFixed(3) +
+        ' shades' +
+        (m.mode === 'uv' ? ', UV-atlas detail' : ', field cell ' + m.cell.toFixed(3)) +
         ', built in ' +
         w.buildMs +
         ' ms'
@@ -685,8 +848,9 @@ const CMD = {
     save(w.id + '-turn.png', R.grid(imgs, num('cols', 4), labs));
   },
   clip() {
-    const zlib = require('zlib'),
-      w = build(pos[0]),
+    const artHistory = require('../src/art-effects.js').history({ frames: 24 });
+    const volumeHistory = lib().KIT.atmosphere.history();
+    const w = build(pos[0]),
       fps = num('fps', 12),
       from = num('from', 0),
       to = num('to', 6),
@@ -695,12 +859,17 @@ const CMD = {
     for (let k = 0; k < n; k++) {
       const t = from + k / fps;
       pose(w, t);
-      const im = R.render(w, view({ t, w: num('w', 600), h: num('h', 420) }));
-      frames.push(R.upscale(im, im.px));
+      const im = R.render(w, view({ t, artHistory, volumeHistory, w: num('w', 600), h: num('h', 420) }));
+      frames.push(displayFrame(im, w));
     }
     const f = opt.out ? path.resolve(opt.out) : path.join(OUT, w.id + '-clip.png');
     fs.mkdirSync(OUT, { recursive: true });
     PNG.animate(f, frames, fps);
+    if (opt.text) {
+      const textFile = textSidecar(f);
+      fs.writeFileSync(textFile, frames.map(frame => frame.text).join('\n\f\n') + '\n');
+      console.log('wrote', textFile);
+    }
     console.log('wrote', f, frames.length, 'frames at', fps, 'a second (an animated PNG: a browser will play it)');
   },
   motion() {
@@ -875,6 +1044,394 @@ const CMD = {
       console.log('kept', w.id, 'at', ts.join(', '));
     }
   },
+  /* a diorama beside a reference picture, both at true pixel size: the reference brought down to its art pixels (--px: how many of
+     its pixels make one, as 2 for a picture shown at twice its size), the diorama drawn at the same size in art pixels, the two side
+     by side scaled up alike (--up, 3), and the crisp measures of each, so a look can be held to a picture it is after */
+  /* pixel-art lint: the mistakes pixel artists name, at a diorama's own pixel size, beside what the references come to (the medians
+     of the pixel-art references at their own size): orphan pixels, doubles (lines two pixels thick at a step), jaggies (uneven steps
+     along an edge), banding (tones that only echo an edge), pillow shading (darker all round the rim, whichever way it faces), noise
+     (clusters of three pixels or fewer) and colours. --map writes where each is: orphans red, doubles magenta, jaggies yellow,
+     banding cyan */
+  lint() {
+    const Cr = require('./critic.js'),
+      ids = pos.length ? pos : die('lint <id ...> [--map --ortho]'),
+      keys = ['orphans', 'doubles', 'jaggies', 'banding', 'pillow', 'noise', 'colours'],
+      fmt = (k, v) => (k === 'colours' ? String(v) : (v * 100).toFixed(1) + '%');
+    console.log(''.padEnd(16) + keys.map(k => k.padStart(10)).join(''));
+    console.log('references'.padEnd(16) + keys.map(k => fmt(k, Cr.REFERENCE[k]).padStart(10)).join(''));
+    for (const id of ids) {
+      const t = num('t', 2),
+        w = build(id);
+      pose(w, t);
+      const im = R.render(w, view({ t })),
+        img = { w: im.w, h: im.h, rgb: im.rgb || im.color },
+        r = Cr.lint(img, { bg: (im.palette || w.pal)[0] });
+      console.log(w.id.padEnd(16) + keys.map(k => fmt(k, r[k]).padStart(10)).join(''));
+      if (opt.map) save(w.id + '-lint.png', R.upscale(Cr.lintMap(img, r), im.px));
+    }
+  },
+  /* a review sheet: the diorama from a fixed set of shots (its own view, its four sides, from above, from low down, far, near and
+     close), one sheet, with the lint of each under its label in the log; beside the last sheet of it (kept as -review-before.png),
+     so a change can be seen. --ref picture.png --px 2 puts a reference first */
+  review() {
+    const Cr = require('./critic.js'),
+      [id] = pos.length ? pos : die('review <id> [--ref picture.png --px 2 --ortho]'),
+      t = num('t', 2),
+      w = build(id),
+      c = w.cam || {},
+      shots = [];
+    pose(w, t);
+    for (const [label, dy, pitch, zoom] of Cr.SHOTS) {
+      const im = R.render(
+        w,
+        view({
+          t,
+          w: num('w', 480),
+          h: num('h', 340),
+          yaw: (opt.yaw === undefined ? c.yaw || 0 : +opt.yaw) + dy,
+          pitch: pitch === null ? (opt.pitch === undefined ? c.pitch : +opt.pitch) : pitch,
+          zoom
+        })
+      );
+      const img = { w: im.w, h: im.h, rgb: im.rgb || im.color },
+        r = Cr.lint(img, { bg: (im.palette || w.pal)[0] });
+      console.log(
+        label.padEnd(8),
+        ['orphans', 'doubles', 'jaggies', 'banding', 'pillow']
+          .map(k => k + ' ' + (r[k] * 100).toFixed(1) + '%')
+          .join('  ')
+      );
+      shots.push(R.upscale(img, im.px));
+    }
+    if (opt.ref) {
+      const k = num('px', 1),
+        src = PNG.read(path.resolve(opt.ref)),
+        W = Math.floor(src.w / k),
+        H = Math.floor(src.h / k),
+        ref = { w: W, h: H, rgb: new Uint8Array(W * H * 3) };
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const s0 =
+            (Math.min(src.h - 1, Math.floor(y * k + k / 2)) * src.w + Math.min(src.w - 1, Math.floor(x * k + k / 2))) *
+            3;
+          ref.rgb.set(src.rgb.subarray(s0, s0 + 3), (y * W + x) * 3);
+        }
+      const up = Math.max(1, Math.round(shots[0].h / H));
+      shots.unshift(R.upscale(ref, up));
+    }
+    // (the shots padded to one size, for the sheet)
+    const SW = Math.max(...shots.map(q => q.w)),
+      SH = Math.max(...shots.map(q => q.h)),
+      pad = q => {
+        const o = { w: SW, h: SH, rgb: new Uint8Array(SW * SH * 3) };
+        for (let y = 0; y < q.h; y++) o.rgb.set(q.rgb.subarray(y * q.w * 3, (y + 1) * q.w * 3), y * SW * 3);
+        return o;
+      },
+      sheet = R.grid(shots.map(pad), num('cols', 3)),
+      file = path.join(OUT, w.id + '-review.png'),
+      before = path.join(OUT, w.id + '-review-before.png');
+    fs.mkdirSync(OUT, { recursive: true });
+    if (fs.existsSync(file)) fs.copyFileSync(file, before);
+    save(w.id + '-review.png', sheet);
+    if (fs.existsSync(before)) {
+      const b = PNG.read(before);
+      if (b.w === sheet.w && b.h === sheet.h) save(w.id + '-review-vs-before.png', R.grid([b, sheet], 2));
+    }
+  },
+  /* shimmer: the diorama over a short move of the camera (--mode orbit, zoom, pan, or still: the camera at rest while time runs),
+     frame by frame at one pixel size; the share of pixels that change and change back (A, B, A over three frames), which a smooth
+     move should not cause, and an animated GIF of it (--frames 24, --step: how far each frame moves) */
+  shimmer() {
+    const Cr = require('./critic.js'),
+      [id] = pos.length ? pos : die('shimmer <id> [--mode orbit|zoom|pan|still --frames 24 --step s --ortho]'),
+      t0 = num('t', 2),
+      n = num('frames', 24),
+      mode = opt.mode || 'orbit',
+      w = build(id),
+      c = w.cam || {},
+      frames = [];
+    const st = num('step', mode === 'orbit' ? 0.004 : mode === 'zoom' ? 0.012 : mode === 'pan' ? 0.02 : 1 / 12);
+    let px = 0, bg = w.pal[0];
+    for (let k = 0; k < n; k++) {
+      const t = mode === 'still' ? t0 + k * st : t0;
+      pose(w, t);
+      const v = view({ t, w: num('w', 480), h: num('h', 340) }),
+        T = (v.target || c.target || [0, 0, 0]).slice();
+      if (mode === 'orbit') v.yaw = (v.yaw === undefined ? c.yaw || 0 : v.yaw) + k * st;
+      if (mode === 'zoom') v.zoom = (v.zoom || 1) * (1 + k * st);
+      if (mode === 'pan') v.target = [T[0] + k * st, T[1], T[2] + k * st * 0.5];
+      if (px) v.px = px;
+      const im = R.render(w, v);
+      px = px || im.px;
+      bg = (im.palette || w.pal)[0];
+      frames.push({ w: im.w, h: im.h, rgb: im.rgb || im.color });
+    }
+    const fl = Cr.flicker(frames, { bg });
+    console.log(w.id + ' ' + mode + ': ' + (fl * 100).toFixed(2) + '% of pixels flicker (change and change back)');
+    fs.mkdirSync(OUT, { recursive: true });
+    const f = opt.out ? path.resolve(opt.out) : path.join(OUT, w.id + '-shimmer-' + mode + '.gif');
+    fs.writeFileSync(
+      f,
+      Cr.gif(
+        frames.map(q => R.upscale(q, Math.max(1, Math.min(4, px)))),
+        Math.round(num('delay', 8))
+      )
+    );
+    console.log('wrote', f);
+  },
+  /* paint-over: a view of the diorama at its own pixel size, to be painted over by hand or by a script, and the painted pixels taken
+     back as decals: each pinned to the place on the surface it fell on (a pixel painted just past an edge is put on the surface beside
+     it, carried on), so it stays put from every view. The decals are kept in studio/paint/<id>/decals.json; the game's build puts
+     them in the page, and the CLI draws them at once */
+  paint() {
+    const [sub, id] = pos;
+    if (!['export', 'absorb', 'clear'].includes(sub) || !id)
+      die(
+        'paint export <id> [view options] | paint absorb <id> [--png painted.png] | paint clear <id>   [--dir studio/paint/<id>]'
+      );
+    const world = sub === 'export' ? build(id) : null,
+      dir = paintDirectory(opt.dir ? id : world ? world.id : scene(id).id),
+      dfile = path.join(dir, 'decals.json');
+    if (sub === 'clear') {
+      if (fs.existsSync(dfile)) fs.unlinkSync(dfile);
+      console.log('cleared', dfile);
+      return;
+    }
+    if (sub === 'export') {
+      const t = num('t', 2),
+        w = world;
+      pose(w, t);
+      const pick = {},
+        vw = view({ t, pick }),
+        im = R.render(w, vw);
+      if (!pick.W)
+        die('paint: ' + id + ' is not drawn per pixel (its look.pixel), so there is nothing to pin paint to');
+      fs.mkdirSync(dir, { recursive: true });
+      const { W, H } = pick,
+        buf = new Float32Array(W * H * 6).fill(NaN);
+      for (let r = 0; r < H; r++)
+        for (let x = 0; x < W; x++) {
+          const q = (H - 1 - r) * W + x,
+            i = pick.win[q];
+          if (i < 0 || !pick.PIX[i * 8]) continue;
+          buf.set(
+            [pick.X[q], pick.Y[q], pick.Z[q], pick.PIX[i * 8 + 3], pick.PIX[i * 8 + 4], pick.PIX[i * 8 + 5]],
+            (r * W + x) * 6
+          );
+        }
+      PNG.write(path.join(dir, 'view.png'), im.w, im.h, im.rgb);
+      PNG.write(path.join(dir, 'paint.png'), im.w, im.h, im.rgb);
+      fs.writeFileSync(path.join(dir, 'view.bin'), Buffer.from(buf.buffer));
+      fs.writeFileSync(
+        path.join(dir, 'view.json'),
+        JSON.stringify(
+          {
+            id,
+            w: W,
+            h: H,
+            t,
+            view: { yaw: vw.yaw, pitch: vw.pitch, zoom: vw.zoom, target: vw.target, ortho: vw.ortho },
+            detail: w.detail,
+            pal: w.pal.map(c => '#' + c.toString(16).padStart(6, '0')),
+            how:
+              'paint over paint.png in the palette colours (#ff00ff takes paint off), then: ink-studio paint absorb ' +
+              id
+          },
+          null,
+          1
+        )
+      );
+      console.log(
+        'wrote',
+        path.join(dir, 'paint.png'),
+        W + 'x' + H,
+        '(paint over it, then: ink-studio paint absorb ' + id + ')'
+      );
+      return;
+    }
+    // absorb
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, 'view.json'), 'utf8')),
+      raw = fs.readFileSync(path.join(dir, 'view.bin')),
+      buf = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4),
+      a = PNG.read(path.join(dir, 'view.png')),
+      b = PNG.read(path.resolve(opt.png || path.join(dir, 'paint.png'))),
+      W = meta.w,
+      H = meta.h;
+    if (b.w !== a.w || b.h !== a.h)
+      die('paint: the painted picture is ' + b.w + 'x' + b.h + ', the view ' + a.w + 'x' + a.h);
+    const pal = meta.pal.map(h => parseInt(h.slice(1), 16)),
+      nearest = (r, g, bl) => {
+        let best = 0,
+          bd = 1e9;
+        pal.forEach((c, i) => {
+          const d = (((c >> 16) & 255) - r) ** 2 + (((c >> 8) & 255) - g) ** 2 + ((c & 255) - bl) ** 2;
+          if (d < bd) ((bd = d), (best = i));
+        });
+        return [best, bd];
+      },
+      ok = (x, y) => x >= 0 && y >= 0 && x < W && y < H && buf[(y * W + x) * 6] === buf[(y * W + x) * 6],
+      P3 = (x, y) => Array.from(buf.subarray((y * W + x) * 6, (y * W + x) * 6 + 6)),
+      px = 1 / (meta.detail || 12);
+    let off = 0,
+      lost = 0;
+    const fresh = [],
+      erase = [];
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const k = (y * W + x) * 3;
+        if (a.rgb[k] === b.rgb[k] && a.rgb[k + 1] === b.rgb[k + 1] && a.rgb[k + 2] === b.rgb[k + 2]) continue;
+        const del = b.rgb[k] === 255 && b.rgb[k + 1] === 0 && b.rgb[k + 2] === 255;
+        let at = null;
+        if (ok(x, y)) at = P3(x, y);
+        else {
+          // (past the edge of a thing: the nearest pixel that has a surface, carried on across the picture by how it changes there)
+          for (let r = 1; r <= 4 && !at; r++)
+            for (let dy = -r; dy <= r && !at; dy++)
+              for (let dx = -r; dx <= r && !at; dx++) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== r || !ok(x + dx, y + dy)) continue;
+                const nx = x + dx,
+                  ny = y + dy,
+                  q = P3(nx, ny),
+                  gx = ok(nx + 1, ny)
+                    ? P3(nx + 1, ny)
+                    : ok(nx - 1, ny)
+                      ? P3(nx - 1, ny).map((v, i) => 2 * q[i] - v)
+                      : q,
+                  gy = ok(nx, ny + 1)
+                    ? P3(nx, ny + 1)
+                    : ok(nx, ny - 1)
+                      ? P3(nx, ny - 1).map((v, i) => 2 * q[i] - v)
+                      : q;
+                at = q.slice();
+                for (let i = 0; i < 3; i++) at[i] = q[i] + (gx[i] - q[i]) * -dx + (gy[i] - q[i]) * -dy;
+              }
+        }
+        if (!at) {
+          lost++;
+          continue;
+        }
+        if (del) {
+          erase.push(at);
+          continue;
+        }
+        const [ci, d] = nearest(b.rgb[k], b.rgb[k + 1], b.rgb[k + 2]);
+        if (d > 12) off++;
+        fresh.push([...at.map(v => Math.round(v * 1e4) / 1e4), ci]);
+      }
+    const old = fs.existsSync(dfile) ? JSON.parse(fs.readFileSync(dfile, 'utf8')).decals || [] : [],
+      near = (d, e) => Math.hypot(d[0] - e[0], d[1] - e[1], d[2] - e[2]) < px * 0.45,
+      kept = old.filter(d => !fresh.some(e => near(d, e)) && !erase.some(e => near(d, e))),
+      decals = kept.concat(fresh);
+    fs.writeFileSync(dfile, JSON.stringify({ id, detail: meta.detail, decals }));
+    console.log(
+      `${fresh.length} pixels painted, ${erase.length} taken off; ${decals.length} decals in ${dfile}` +
+        (off ? `; ${off} were not palette colours (the nearest was taken)` : '') +
+        (lost ? `; ${lost} had no surface within 4 pixels and were left out` : '')
+    );
+  },
+  compare() {
+    const C = require('./crisp.js'),
+      [id, ref] = pos;
+    if (!id || !ref) die('compare <id> <reference.png> [--px 2 --up 3]');
+    const k = num('px', 1),
+      src = PNG.read(path.resolve(ref)),
+      W = Math.floor(src.w / k),
+      H = Math.floor(src.h / k),
+      rimg = { w: W, h: H, rgb: new Uint8Array(W * H * 3) };
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const s0 =
+          (Math.min(src.h - 1, Math.floor(y * k + k / 2)) * src.w + Math.min(src.w - 1, Math.floor(x * k + k / 2))) * 3;
+        rimg.rgb.set(src.rgb.subarray(s0, s0 + 3), (y * W + x) * 3);
+      }
+    // (a reference with more colours than a pixel artist's palette, as a JPEG has, is brought to --colours of them, 32 by default)
+    const seen = new Set();
+    for (let i = 0; i < W * H && seen.size <= 256; i++)
+      seen.add((rimg.rgb[i * 3] << 16) | (rimg.rgb[i * 3 + 1] << 8) | rimg.rgb[i * 3 + 2]);
+    if (seen.size > 256 || opt.colours) Object.assign(rimg, C.quantize(rimg, num('colours', 32)));
+    const t = num('t', 2),
+      w = build(id);
+    pose(w, t);
+    // Use one art pixel per reference pixel, regardless of the scene's detail setting.
+    const im = R.render(w, view({ t, w: W, h: H, px: 1 })),
+      cols = ['stray', 'specks', 'flat', 'fine', 'edges', 'spread', 'cool', 'colours'],
+      fmt = (c, v) => {
+        if (!Number.isFinite(v)) return 'n/a';
+        if (c === 'fine') return v.toFixed(3);
+        return c === 'colours' ? String(v) : (v * 100).toFixed(1) + '%';
+      },
+      mr = C.measure(rimg, { bg: (rimg.rgb[0] << 16) | (rimg.rgb[1] << 8) | rimg.rgb[2] }), // (its corner colour, joined to the edge, is its background)
+      md = C.measure(im, { bg: (im.palette || w.pal)[0] });
+    console.log(''.padEnd(16) + cols.map(c => c.padStart(10)).join(''));
+    console.log(path.basename(ref).slice(0, 15).padEnd(16) + cols.map(c => fmt(c, mr[c]).padStart(10)).join(''));
+    console.log(w.id.padEnd(16) + cols.map(c => fmt(c, md[c]).padStart(10)).join(''));
+    const up = num('up', 3),
+      a = R.upscale(rimg, up),
+      b = R.upscale(im, up);
+    save(w.id + '-vs-' + path.basename(ref).replace(/\.[a-z]+$/i, '') + '.png', R.grid([a, b], 2));
+  },
+  /* how crisp a diorama is at its own pixel size, beside what the pixel-art references came to: stray pixels (unlike all eight round
+     them), specks (in same-colour patches of 3 or fewer), flat area (like all eight), the share of brightness variation at the finest
+     frequencies, how much of it runs straight across or down, checker (dither) and how many colours make up 95% of it.
+     A mark (!) is a target missed. --map writes where the stray pixels are. --t, and the view options, as for render */
+  crisp() {
+    const C = require('./crisp.js'),
+      ids = pos[0] === 'all' ? lib().SCENES.map(s => s.id) : pos;
+    if (!ids.length) die('crisp which diorama? (or: all)');
+    const t = num('t', 2),
+      pc = v => (v * 100).toFixed(1) + '%',
+      cols = ['stray', 'specks', 'flat', 'fine', 'straight', 'edges', 'spread', 'cool', 'checker', 'colours'],
+      fmt = (k, v) => {
+        if (!Number.isFinite(v)) return 'n/a';
+        if (k === 'fine' || k === 'straight') return v.toFixed(3);
+        return k === 'colours' ? String(v) : pc(v);
+      },
+      miss = (k, v) =>
+        C.FLOORS[k] !== undefined
+          ? v >= C.FLOORS[k]
+            ? ' '
+            : '!'
+          : C.TARGETS[k] === undefined
+            ? ' '
+            : (k === 'flat' ? v >= C.TARGETS[k] : v <= C.TARGETS[k])
+              ? ' '
+              : '!';
+    console.log('diorama'.padEnd(16) + cols.map(c => c.padStart(11)).join(''));
+    console.log(
+      'references'.padEnd(16) +
+        cols.map(c => (C.REFERENCE[c] ? fmt(c, C.REFERENCE[c][2]) : '').padStart(10) + ' ').join('') +
+        '  (median of 8 at true pixel size)'
+    );
+    console.log(
+      'targets'.padEnd(16) +
+        cols
+          .map(
+            c =>
+              (C.FLOORS[c] !== undefined
+                ? '>' + fmt(c, C.FLOORS[c])
+                : C.TARGETS[c] === undefined
+                  ? ''
+                  : (c === 'flat' ? '>' : '<') + fmt(c, C.TARGETS[c])
+              ).padStart(10) + ' '
+          )
+          .join('')
+    );
+    let missed = 0;
+    for (const id of ids) {
+      const w = build(id);
+      pose(w, t);
+      const im = R.render(w, view({ t })),
+        m = C.measure(im, { bg: (im.palette || w.pal)[0] });
+      const marks = cols.map(c => (Number.isFinite(m[c]) ? miss(c, m[c]) : ' '));
+      missed += marks.some(x => x === '!') ? 1 : 0;
+      console.log(w.id.padEnd(16) + cols.map((c, i) => fmt(c, m[c]).padStart(10) + marks[i]).join(''));
+      if (opt.map) {
+        save(w.id + '-stray.png', R.upscale(C.strayMap(im, { bg: (im.palette || w.pal)[0] }), im.px));
+        save(w.id + '-edges.png', R.upscale(C.edgeMap(im, { bg: (im.palette || w.pal)[0] }), im.px));
+      }
+    }
+    if (ids.length > 1) console.log(missed + ' of ' + ids.length + ' miss a target');
+  },
   check() {
     const files = fs.existsSync(SNAPS)
       ? fs
@@ -929,4 +1486,15 @@ const CMD = {
     process.exit(fails ? 1 : 0);
   }
 };
-(CMD[cmd] || (() => die('unknown command "' + cmd + '". try: ink-studio help')))();
+async function run() {
+  if (/\.glb$/i.test(pos[0] || '') && opt.uv !== 'off') {
+    try {
+      importedAssets.set(path.resolve(pos[0]), await require('../index.js').readAsset(path.resolve(pos[0]), { size: 3 }));
+    } catch (error) {
+      if (opt.uv === true) throw error;
+      console.error('UV asset import unavailable: ' + error.message + '. Using the geometry importer. Pass --uv to require UV import.');
+    }
+  }
+  await (CMD[cmd] || (() => die('unknown command "' + cmd + '". try: ink-studio help')))();
+}
+run().catch(error => { console.error(error.message); process.exitCode = 1; });

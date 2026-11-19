@@ -1,4 +1,4 @@
-// The smallest PNG reader and writer that will do: 8-bit RGB, no interlace. Enough to save what ink-studio draws and read it back.
+// PNG output is 8-bit RGB. Import also handles non-interlaced grayscale, indexed and alpha PNGs.
 const zlib = require('zlib'),
   fs = require('fs');
 const CRC = new Uint32Array(256);
@@ -20,57 +20,82 @@ const chunk = (type, data) => {
   cr.writeUInt32BE(crc(td));
   return Buffer.concat([len, td, cr]);
 };
-function write(file, w, h, rgb) {
-  const raw = Buffer.alloc((w * 3 + 1) * h);
+function encode(w, h, pixels, channels = 3) {
+  const stride = w * channels;
+  if (![3, 4].includes(channels) || pixels.length !== stride * h) throw new Error('PNG pixel count does not match its shape');
+  const raw = Buffer.alloc((stride + 1) * h);
   for (let y = 0; y < h; y++) {
-    raw[y * (w * 3 + 1)] = 0;
-    Buffer.from(rgb.buffer, rgb.byteOffset + y * w * 3, w * 3).copy(raw, y * (w * 3 + 1) + 1);
+    raw[y * (stride + 1)] = 0;
+    Buffer.from(pixels.buffer, pixels.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1);
   }
   const hd = Buffer.alloc(13);
   hd.writeUInt32BE(w, 0);
   hd.writeUInt32BE(h, 4);
   hd[8] = 8;
-  hd[9] = 2;
-  fs.writeFileSync(
-    file,
-    Buffer.concat([
+  hd[9] = channels === 4 ? 6 : 2;
+  return Buffer.concat([
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
       chunk('IHDR', hd),
       chunk('IDAT', zlib.deflateSync(raw, { level: 6 })),
       chunk('IEND', Buffer.alloc(0))
-    ])
-  );
+  ]);
 }
-function read(file) {
-  const b = fs.readFileSync(file);
+function write(file, w, h, rgb) {
+  fs.writeFileSync(file, encode(w, h, rgb));
+}
+function raster(file) {
+  const b = Buffer.isBuffer(file) ? file : fs.readFileSync(file);
+  if (b.length < 33 || b.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('Not a PNG file');
   let p = 8,
     w = 0,
     h = 0,
-    ch = 3;
+    bits,
+    color,
+    table,
+    transparency;
   const parts = [];
-  while (p < b.length) {
+  while (p + 12 <= b.length) {
     const len = b.readUInt32BE(p),
       type = b.toString('ascii', p + 4, p + 8),
       d = b.subarray(p + 8, p + 8 + len);
+    if (p + 12 + len > b.length) throw new Error('Truncated PNG chunk');
     if (type === 'IHDR') {
+      if (len !== 13 || d[10] || d[11] || d[12]) throw new Error('PNG must be non-interlaced with standard filtering and compression');
       w = d.readUInt32BE(0);
       h = d.readUInt32BE(4);
-      ch = d[9] === 6 ? 4 : 3;
-    } else if (type === 'IDAT') parts.push(d);
+      bits = d[8];
+      color = d[9];
+    } else if (type === 'PLTE') table = d;
+    else if (type === 'tRNS') transparency = d;
+    else if (type === 'IDAT') parts.push(d);
+    else if (type === 'IEND') break;
     p += 12 + len;
   }
-  const raw = zlib.inflateSync(Buffer.concat(parts)),
-    st = w * ch + 1,
-    out = new Uint8Array(w * h * 3),
-    row = new Uint8Array(w * ch),
-    prev = new Uint8Array(w * ch);
+  const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
+  const allowed = color === 0 ? [1, 2, 4, 8, 16] : color === 3 ? [1, 2, 4, 8] : [8, 16];
+  if (!w || !h || w * h > 16777216 || !ch || !allowed.includes(bits) || (color === 3 && !table))
+    throw new Error('Unsupported PNG dimensions or colour format');
+  const rowBytes = Math.ceil(w * ch * bits / 8),
+    bpp = Math.ceil(ch * bits / 8),
+    st = rowBytes + 1,
+    raw = zlib.inflateSync(Buffer.concat(parts), { maxOutputLength: h * st }),
+    out = bits === 16 ? new Uint16Array(w * h * 4) : new Uint8Array(w * h * 4),
+    row = new Uint8Array(rowBytes),
+    prev = new Uint8Array(rowBytes),
+    max = color === 3 ? 255 : (1 << bits) - 1;
+  if (raw.length !== h * st) throw new Error('Invalid PNG scanline length');
+  const sample = i => bits === 16 ? row[2 * i] * 256 + row[2 * i + 1]
+    : bits === 8 ? row[i]
+    : (row[(i * bits) >> 3] >> (8 - bits - (i * bits & 7))) & max;
+  const transparent = i => transparency && transparency.length >= 2 * (i + 1) ? transparency.readUInt16BE(2 * i) : -1;
   for (let y = 0; y < h; y++) {
     const f = raw[y * st];
-    for (let i = 0; i < w * ch; i++) {
+    if (f > 4) throw new Error('Invalid PNG filter');
+    for (let i = 0; i < rowBytes; i++) {
       const x = raw[y * st + 1 + i],
-        a = i >= ch ? row[i - ch] : 0,
+        a = i >= bpp ? row[i - bpp] : 0,
         u = prev[i],
-        c = i >= ch ? prev[i - ch] : 0;
+        c = i >= bpp ? prev[i - bpp] : 0;
       let v = x;
       if (f === 1) v = x + a;
       else if (f === 2) v = x + u;
@@ -85,13 +110,36 @@ function read(file) {
       row[i] = v & 255;
     }
     for (let x = 0; x < w; x++) {
-      out[(y * w + x) * 3] = row[x * ch];
-      out[(y * w + x) * 3 + 1] = row[x * ch + 1];
-      out[(y * w + x) * 3 + 2] = row[x * ch + 2];
+      const dst = (y * w + x) * 4, src = x * ch;
+      if (color === 3) {
+        const index = sample(src);
+        if (index * 3 + 2 >= table.length) throw new Error('PNG references a colour outside its palette');
+        out[dst] = table[index * 3];
+        out[dst + 1] = table[index * 3 + 1];
+        out[dst + 2] = table[index * 3 + 2];
+        out[dst + 3] = transparency?.[index] ?? 255;
+      } else if (color === 0 || color === 4) {
+        const gray = sample(src);
+        out[dst] = out[dst + 1] = out[dst + 2] = gray;
+        out[dst + 3] = color === 4 ? sample(src + 1) : gray === transparent(0) ? 0 : max;
+      } else {
+        const r = sample(src), g = sample(src + 1), b = sample(src + 2);
+        out[dst] = r;
+        out[dst + 1] = g;
+        out[dst + 2] = b;
+        out[dst + 3] = color === 6 ? sample(src + 3)
+          : r === transparent(0) && g === transparent(1) && b === transparent(2) ? 0 : max;
+      }
     }
     prev.set(row);
   }
-  return { w, h, rgb: out };
+  return { w, h, data: out, max };
+}
+function read(file) {
+  const { w, h, data, max } = raster(file);
+  const rgb = new Uint8Array(w * h * 3);
+  for (let i = 0; i < rgb.length; i++) rgb[i] = Math.round(data[Math.floor(i / 3) * 4 + i % 3] * 255 / max);
+  return { w, h, rgb };
 }
 // an animated PNG: the first frame is an ordinary picture, the rest ride along as extra chunks. Browsers play it; a plain viewer shows frame one
 function animate(file, frames, fps) {
@@ -134,4 +182,4 @@ function animate(file, frames, fps) {
   out.push(chunk('IEND', Buffer.alloc(0)));
   fs.writeFileSync(file, Buffer.concat(out));
 }
-module.exports = { write, read, animate };
+module.exports = { encode, write, read, raster, animate };

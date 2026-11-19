@@ -723,6 +723,10 @@
       LB = asList(b0),
       a = { ids: LA, count: LA.length },
       b = { ids: LB, count: LB.length };
+    if (!a.count || !b.count || [...LA, ...LB].some(i => !Number.isSafeInteger(i) || i < 0 || i * 16 >= st.base.length))
+      throw new Error('Morphs need nonempty sets of valid splat indices');
+    if (o.correspondence !== undefined && !['nearest', 'transport'].includes(o.correspondence))
+      throw new Error('Unknown morph correspondence mode');
     const D = st.D,
       base = st.base,
       box = r => {
@@ -776,8 +780,16 @@
         }
         return out;
       },
-      ab = pairOf(a, ba, b, bb),
-      bA = pairOf(b, bb, a, ba),
+      transportSamples = r => r.ids.map(i => {
+        const offset = i * 16, c = base[offset + 7];
+        return { id: String(i), position: [base[offset], base[offset + 1], base[offset + 2]],
+          color: [c & 255, (c >> 8) & 255, (c >> 16) & 255].map(v => v / 255) };
+      }),
+      transport = o.correspondence === 'transport'
+        ? K.procedural.motion.transportSplats(transportSamples(a), transportSamples(b), { normalize: 'bounds', ...o.transport })
+        : null,
+      ab = transport ? transport.forward : pairOf(a, ba, b, bb),
+      bA = transport ? transport.reverse : pairOf(b, bb, a, ba),
       dur = o.dur || 2,
       mid = [0, 1, 2].map(k => (ba.lo[k] + ba.hi[k] + bb.lo[k] + bb.hi[k]) / 4),
       ease = x => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
@@ -793,9 +805,12 @@
       // dab i (made where it is) travels toward where dab j was made, s of the way
       const o2 = i * 16,
         sw = o.swirl ? o.swirl * Math.sin(Math.PI * s) : 0;
-      let x = base[o2] + (base[j * 16] - base[o2]) * s,
-        y = base[o2 + 1] + (base[j * 16 + 1] - base[o2 + 1]) * s,
-        z = base[o2 + 2] + (base[j * 16 + 2] - base[o2 + 2]) * s;
+      const tx = transport ? j[0] : base[j * 16],
+        ty = transport ? j[1] : base[j * 16 + 1],
+        tz = transport ? j[2] : base[j * 16 + 2];
+      let x = base[o2] + (tx - base[o2]) * s,
+        y = base[o2 + 1] + (ty - base[o2 + 1]) * s,
+        z = base[o2 + 2] + (tz - base[o2 + 2]) * s;
       if (sw) {
         const dx = x - mid[0],
           dz = z - mid[2],
@@ -812,6 +827,7 @@
       st.rows[i >> 9] = 1;
     };
     const sys = {
+      transport,
       go(b2) {
         toB = b2 === undefined ? !toB : b2;
         from = cur;
@@ -836,9 +852,9 @@
         const s = ease(Math.max(0, Math.min(1, cur)));
         // those of a go out toward b, fading as they arrive; those of b come in from a, showing as they come
         for (let k = 0; k < a.count; k++)
-          place(a.first + k, ab[k], s, alphaA[k] * Math.max(0, 1 - s * 1.6 + 0.3 * (1 - s)));
+          place(a.ids[k], ab[k], s, alphaA[k] * Math.max(0, 1 - s * 1.6 + 0.3 * (1 - s)));
         for (let k = 0; k < b.count; k++)
-          place(b.first + k, bA[k], 1 - s, alphaB[k] * Math.max(0, Math.min(1, (s - 0.25) * 1.6)));
+          place(b.ids[k], bA[k], 1 - s, alphaB[k] * Math.max(0, Math.min(1, (s - 0.25) * 1.6)));
       }
     };
     return sys;

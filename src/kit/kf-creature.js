@@ -21,6 +21,8 @@
       own2 = [],
       wgt = [],
       splits = [],
+      ancestry = new Map(),
+      restJoints = new Map(),
       norm = B.norm;
     const bone = name => BN[name] || (BN[name] = Object.keys(BN).length + 1);
     S.emit = (pr, n0, n1) => {
@@ -108,10 +110,11 @@
         if (p <= K[i]) return K[i - 1] + (K[i + 1] - K[i - 1]) * ease((p - K[i - 2]) / (K[i] - K[i - 2]));
       return K[K.length - 1];
     };
-    let M = null;
+    let M = null, restPose = null, capture = false;
     const set = (name, R, o, p) => {
       const b = BN[name];
       if (!b || !M) return;
+      if (capture && !restJoints.has(name)) restJoints.set(name, { head: o.slice() });
       const k = b * 12;
       for (let i = 0; i < 9; i++) M[k + i] = R[i];
       M[k + 9] = p[0] - (R[0] * o[0] + R[1] * o[1] + R[2] * o[2]);
@@ -169,6 +172,12 @@
           ? [name + '#' + (bj + 1), name + '#' + bj, 1 - bu]
           : [name + '#' + bj, name + '#' + (bj + 1), bu];
       });
+      for (let i = 0; i < n; i++) {
+        const key = name + '#' + i;
+        if (i > 0) ancestry.set(key, name + '#' + (i - 1));
+        restJoints.set(key, { head: C0[i].slice(), tail: add(C0[i], T0[i], Math.max(0.05,
+          len(sub(C0[Math.min(n - 1, i + 1)], C0[Math.max(0, i - 1)])) * 0.5)) });
+      }
       const JT = [];
       return {
         n,
@@ -215,6 +224,7 @@
       return { R: Rb, o: L.k, p: kn };
     };
     const bind = (W, pose) => {
+      restPose = pose;
       const D = W.data;
       for (const [name, fn] of splits) {
         const b = BN[name];
@@ -266,7 +276,33 @@
       KIT.bones.bind(W, { ids, bid, bid2, w2, M, pose }); // (the library remembers the rest pose, hands the splats to the graphics card and moves what is left)
       return W;
     };
+    function modelWeights(tag, p) {
+      let primary = tag, secondary, weight = 0;
+      for (const [name, splitAt] of splits) if (primary === name) {
+        const value = splitAt(...p);
+        if (Array.isArray(value)) [primary, secondary, weight] = value;
+        else primary = value;
+      }
+      if (!primary) return [];
+      return weight > 0.001 ? [[primary, 1 - weight], [secondary, weight]] : [[primary, 1]];
+    }
+    function modelFrame(t, dt, pose = restPose) {
+      if (!M) throw new Error('Bind the creature before sampling its model pose');
+      capture = true;
+      try {
+        if (pose) pose(t, dt);
+      } finally {
+        capture = false;
+      }
+      return Object.fromEntries(Object.entries(BN).map(([name, index]) => [name, Array.from(M.slice(index * 12, index * 12 + 12))]));
+    }
+    function modelJoint(name) {
+      return { ...restJoints.get(name), parent: ancestry.get(name) };
+    }
     return {
+      modelWeights,
+      modelFrame,
+      modelJoint,
       bone,
       part,
       set,

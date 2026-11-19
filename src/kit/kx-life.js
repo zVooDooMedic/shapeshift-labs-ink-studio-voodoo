@@ -62,6 +62,17 @@
   const F = K.form || (K.form = {});
 
   // ---------------------------------------------------------------- plants
+  function pipeRadii(nodes, tip, exponent) {
+    const radii = new Float32Array(nodes.length);
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      if (!nodes[i].kids) radii[i] = tip;
+      const parent = nodes[i].parent;
+      if (parent >= 0) radii[parent] = Math.pow(Math.pow(radii[parent], exponent) + Math.pow(radii[i], exponent), 1 / exponent);
+    }
+    return radii;
+  }
+  F.pipeRadii = pipeRadii;
+
   F.colonize = o => {
     o = o || {};
     const R = dice(o.seed || 71),
@@ -76,8 +87,17 @@
         o.where ||
         ((x, y, z) =>
           ((x - cr.c[0]) / cr.r[0]) ** 2 + ((y - cr.c[1]) / cr.r[1]) ** 2 + ((z - cr.c[2]) / cr.r[2]) ** 2 < 1),
-      A = [];
-    for (let t = 0; A.length < (o.n || 360) && t < 20000; t++) {
+      supplied = o.attractors !== undefined,
+      growthMask = o.growthMask,
+      maxChecks = o.maxChecks;
+    if (supplied && (!Array.isArray(o.attractors) || o.attractors.length > 20000 ||
+      !o.attractors.every(p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite))))
+      throw new Error('Colonization attractors must be a bounded list of finite points');
+    if (growthMask !== undefined && typeof growthMask !== 'function')
+      throw new Error('Colonization mask must be a function');
+    const A = supplied ? o.attractors.map(p => p.slice()) : [];
+    let checks = 0;
+    for (let t = 0; !supplied && A.length < (o.n || 360) && t < 20000; t++) {
       const p = [
         cr.c[0] + (R() * 2 - 1) * cr.r[0],
         cr.c[1] + (R() * 2 - 1) * cr.r[1],
@@ -89,9 +109,12 @@
     // the trunk, straight up to where the crown begins
     for (let h = step; h <= trunk; h += step) {
       const q = nodes[nodes.length - 1].p,
-        w = (o.wobble || 0.04) * (R() - 0.5);
+        w = (supplied ? o.wobble ?? 0 : o.wobble || 0.04) * (R() - 0.5),
+        p = [q[0] + up[0] * step + w, q[1] + up[1] * step, q[2] + up[2] * step + w];
+      if ((o.maxNodes !== undefined && nodes.length >= o.maxNodes) ||
+        (growthMask && !growthMask(...p))) break;
       nodes.push({
-        p: [q[0] + up[0] * step + w, q[1] + up[1] * step, q[2] + up[2] * step + w],
+        p,
         parent: nodes.length - 1,
         kids: 0
       });
@@ -106,6 +129,7 @@
         let bi = -1,
           bd = inf * inf;
         for (let i = 0; i < nodes.length; i++) {
+          if (maxChecks !== undefined && ++checks > maxChecks) throw new Error('Colonization exceeds its neighbor budget');
           const q = nodes[i].p,
             d = (q[0] - A[a][0]) ** 2 + (q[1] - A[a][1]) ** 2 + (q[2] - A[a][2]) ** 2;
           if (d < kill * kill) {
@@ -129,6 +153,8 @@
           ]),
           q = nodes[i].p,
           p = [q[0] + d[0] * step, q[1] + d[1] * step, q[2] + d[2] * step];
+        if (o.maxNodes !== undefined && nodes.length >= o.maxNodes) break;
+        if (growthMask && (!growthMask(...p) || !growthMask(...p.map((v, axis) => (v + q[axis]) * 0.5)))) continue;
         if (nodes.some(n => (n.p[0] - p[0]) ** 2 + (n.p[1] - p[1]) ** 2 + (n.p[2] - p[2]) ** 2 < step * step * 0.2))
           continue;
         nodes.push({ p, parent: i, kids: 0 });
@@ -137,15 +163,7 @@
       }
       if (!any) break;
     }
-    // thickness: a twig at every tip, and each limb as thick as all it carries (pipe model)
-    const rad = new Float32Array(nodes.length),
-      ex = o.pipe || 2.4,
-      tw = o.r || 0.018;
-    for (let i = nodes.length - 1; i >= 0; i--) {
-      if (!nodes[i].kids) rad[i] = tw;
-      const p = nodes[i].parent;
-      if (p >= 0) rad[p] = Math.pow(Math.pow(rad[p], ex) + Math.pow(rad[i], ex), 1 / ex);
-    }
+    const rad = pipeRadii(nodes, o.r || 0.018, o.pipe || 2.4);
     // limbs: runs of single children between forks
     const kids = nodes.map(() => []);
     nodes.forEach((n, i) => n.parent >= 0 && kids[n.parent].push(i));

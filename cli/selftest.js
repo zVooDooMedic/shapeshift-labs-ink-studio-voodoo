@@ -160,6 +160,13 @@ module.exports = function (A) {
       faces.count + ' on the face, ' + blue + ' painted'
     );
     // ---- fields, voxels, light, pick
+    const smooth = A.makeSculpt(A.makeBuilder(1)),
+      group = smooth.grp(0.2),
+      material = { r: [1, 2] };
+    smooth.ball([0, 0, 0], 1, material, group);
+    smooth.add({ bc: [0, 0, 0], br: 1, sd: () => NaN }, material, group);
+    smooth.ready();
+    ok('field: an undefined distance does not erase other members of a smooth union', near(smooth.sdf(0, 0, 0), -1));
     const ball = K.shape.sphere([0, 2, 1], 0.6),
       hole = K.fx.tint(st, K.field({ soft: 0.05, shapes: [{ shape: ball, opacity: 0 }] }), 'multiply');
     st.add(hole);
@@ -2752,6 +2759,432 @@ module.exports = function (A) {
     );
     const bad = (reh.warnings || []).length;
     ok('rehearsal: nothing buried', bad === 0);
+  }
+  // ---- pixel-sized nodes (kpx-pixel) and the crispness measure
+  {
+    const PALx = [0x101018, 0x303848, 0x58607a, 0x8890a8, 0xc0c8d8, 0x2a4a2a, 0x4a7a3a, 0x7aaa4a, 0xb0d870];
+    const B = A.makeBuilder(3, PALx),
+      S = K.sculpt(A.makeSculpt(B));
+    S.pixelSize(20);
+    S.sun = [-0.5, 0.75, 0.43];
+    S.wob = 0;
+    const px = S.px;
+    S.box([0, -0.2, 0], [2.2, 0.2, 2.2], K.pixel.lawn({ r: [5, 6, 7, 8], tufts: 0.3 }), { res: px * 0.9 });
+    const rock = S.facet({ at: [-0.9, 0.3, 0.6], size: [0.5, 0.4, 0.45], faces: 9, seed: 4, mat: { r: [1, 2, 3, 4] } });
+    S.canopy({ at: [0.8, 0.9, -0.5], size: [0.7, 0.6, 0.7], lobes: 5, mat: { r: [5, 6, 7, 8] }, seed: 2 });
+    S.pine({ at: [1.4, 0, 1.2], h: 1.6, mat: { r: [5, 6, 7] }, trunk: { r: [1, 2] }, seed: 3 });
+    S.box([-1.2, 0.5, -1.2], [0.5, 0.5, 0.05], K.pixel.masonry({ r: [1, 2, 3, 4], stone: [8, 5] }), { res: px * 0.9 });
+    S.bake();
+    const W = B.finish({
+      cam: { target: [0, 0.4, 0], dist: 7, pitch: 0.5, yaw: 0.7, sway: 0 },
+      radius: 3.5,
+      detail: 20,
+      dither: 0,
+      look: { clean: true, lines: true }
+    });
+    ok(
+      'pixel nodes: a sculpt of grass, a cut rock, a crown, a pine and a wall bakes',
+      W.count > 20000,
+      W.count + ' dabs'
+    );
+    // every face of the cut rock is covered: points spread over its faces all have a dab within a pixel and a half of them
+    let miss = 0,
+      tried = 0;
+    const D = W.data;
+    for (let k = 0; k < 200; k++) {
+      const a = (k / 200) * Math.PI * 2 * 7.3,
+        e = Math.sin(k * 1.7) * 1.2,
+        d = [Math.cos(e) * Math.cos(a), Math.sin(e), Math.cos(e) * Math.sin(a)];
+      // march from outside in to the rock's surface
+      let t = 1.5;
+      for (let i = 0; i < 80; i++) {
+        const v = rock.sd(-0.9 + d[0] * t, 0.3 + d[1] * t, 0.6 + d[2] * t);
+        if (v < 0.002) break;
+        t -= Math.max(0.004, v * 0.9);
+      }
+      const p = [-0.9 + d[0] * t, 0.3 + d[1] * t, 0.6 + d[2] * t];
+      if (p[1] < 0.02) continue;
+      tried++;
+      let near = false;
+      for (let i = 0; i < W.count && !near; i++)
+        if ((D[i * 16] - p[0]) ** 2 + (D[i * 16 + 1] - p[1]) ** 2 + (D[i * 16 + 2] - p[2]) ** 2 < (px * 1.5) ** 2)
+          near = true;
+      if (!near) miss++;
+    }
+    ok(
+      'pixel nodes: a cut rock has no holes (every place on its faces has a dab)',
+      tried > 100 && miss === 0,
+      miss + ' bare of ' + tried
+    );
+    const R = require('./render.js'),
+      C = require('./crisp.js'),
+      im = R.render(W, { t: 0, w: 640, h: 400 }),
+      m = C.measure(im);
+    ok(
+      "pixel nodes: drawn, it is crisp by the study's targets",
+      m.stray < 0.02 && m.specks < 0.07,
+      (m.stray * 100).toFixed(1) + '% stray, ' + (m.specks * 100).toFixed(1) + '% specks'
+    );
+    const tex = K.pixel.masonry({ r: [1, 2, 3, 4], stone: [8, 5], px: 0.05 }).tex;
+    ok(
+      'masonry: a joint is darker than the stone beside it',
+      tex(0.3, 0.001, 0, 0, 0.6, 0, 1) < tex(0.3, 0.12, 0, 0, 0.6, 0, 1) || tex(0.3, 0.001, 0, 0, 0.6, 0, 1) === 1
+    );
+  }
+  // ---- edge sprites (kpz-sprite), prop libraries (kpy-props) and paint-over decals
+  {
+    const sp = K.sprite.art('.+.\n+#-\n###');
+    ok(
+      'sprites: text art is read root first and written back the same',
+      sp.w === 3 &&
+        sp.h === 3 &&
+        sp.cells[0] === 8 &&
+        sp.cells[3 * 2 + 1] === 9 &&
+        K.sprite.show(sp) === '.+.\n+#-\n###'
+    );
+    let big = false;
+    try {
+      K.sprite.art('########');
+    } catch (e) {
+      big = true;
+    }
+    ok('sprites: one wider than the limit is refused', big);
+    const sets = ['grass', 'leafy', 'ivy', 'needles'].map(n => K.sprite.set(n, { n: 4 }));
+    ok(
+      'sprites: every ready set makes sprites within the limits, each with something in it',
+      sets.every(l => l.length === 4 && l.every(q => q.w <= 7 && q.h <= 6 && q.cells.some(v => v)))
+    );
+    // a lawn with tufts along its edges, drawn with them and without: they stand past its edge, and leave its inside alone
+    const PALx = [0x101018, 0x303848, 0x58607a, 0x8890a8, 0xc0c8d8, 0x2a4a2a, 0x4a7a3a, 0x7aaa4a, 0xb0d870];
+    const mk = (withEdges, rs) => {
+      const B = A.makeBuilder(3, PALx),
+        S = K.sculpt(A.makeSculpt(B));
+      S.pixelSize(20);
+      S.pixel = true;
+      S.sun = [-0.5, 0.75, 0.43];
+      S.wob = 0;
+      const mat = { r: [5, 6, 7, 8] };
+      S.box([0, -0.2, 0], [1.6, 0.2, 1.6], withEdges ? K.pixel.edge(mat, { up: 'grass', every: 4, share: 1 }) : mat, {
+        res: S.px * (rs || 0.9)
+      });
+      S.bake();
+      const W = B.finish({
+        cam: { target: [0, 0, 0], dist: 7, pitch: 0.5, yaw: 0.7, sway: 0 },
+        radius: 3,
+        detail: 20,
+        dither: 0,
+        look: { pixel: true, outline: true }
+      });
+      W.pixTex = K.pixel.evaluators(W);
+      W.pixCell = K.pixel.CELL;
+      W.pixView = K.pixel.VIEW;
+      W.pixUnfold = K.pixel.unfold;
+      W.pixAnchors = K.pixel.anchors;
+      return W;
+    };
+    const R = require('./render.js'),
+      a0 = R.render(mk(false), { t: 0, w: 320, h: 220 }),
+      a1 = R.render(mk(true), { t: 0, w: 320, h: 220 }),
+      bg = [(PALx[0] >> 16) & 255, (PALx[0] >> 8) & 255, PALx[0] & 255],
+      isBg = (im, i) => im.rgb[i * 3] === bg[0] && im.rgb[i * 3 + 1] === bg[1] && im.rgb[i * 3 + 2] === bg[2];
+    let grew = 0,
+      lost = 0;
+    for (let i = 0; i < a0.w * a0.h; i++) {
+      if (isBg(a0, i) && !isBg(a1, i)) grew++;
+      if (!isBg(a0, i) && isBg(a1, i)) lost++;
+    }
+    ok(
+      'edge sprites: tufts stand past the edge of the lawn, and take nothing away',
+      grew > 40 && lost === 0,
+      grew + ' pixels past the edge, ' + lost + ' lost'
+    );
+    // the points they stand on are pinned to the surface, not to the dabs: built with dabs of another size, nearly every point is
+    // within a pixel of where it was (so swapping detail levels does not move them)
+    const P1 = K.pixel.anchors(mk(true)),
+      P2 = K.pixel.anchors(mk(true, 0.6)),
+      key = (D, q) => [0, 1, 2].map(c => Math.floor(D[q + c] / ((4 / 20) * 0.5))).join(','),
+      at2 = new Map();
+    for (let q = 0; q < P2.n * 12; q += 12) at2.set(key(P2.data, q), q);
+    let same = 0,
+      near = 0;
+    for (let q = 0; q < P1.n * 12; q += 12) {
+      const q2 = at2.get(key(P1.data, q));
+      if (q2 === undefined) continue;
+      same++;
+      if (
+        Math.hypot(P1.data[q] - P2.data[q2], P1.data[q + 1] - P2.data[q2 + 1], P1.data[q + 2] - P2.data[q2 + 2]) <
+        1 / 20
+      )
+        near++;
+    }
+    ok(
+      'edge sprites: the points they stand on stay put when the dabs are made another size',
+      P1.n > 100 && same > P1.n * 0.8 && near > same * 0.9,
+      near + ' of ' + same + ' within a pixel'
+    );
+    // props: a slab with a wall on it; things at the foot of the wall stand outside it and near it, facing out, the same each time
+    const B = A.makeBuilder(5, PALx),
+      S = K.sculpt(A.makeSculpt(B));
+    S.pixelSize(20);
+    S.box([0, -0.2, 0], [2, 0.2, 2], { r: [5, 6, 7] }, { res: S.px });
+    S.box([0, 0.5, 0], [0.6, 0.5, 0.4], { r: [1, 2, 3] }, { res: S.px });
+    const foot = () => K.props.wallBase(S, { box: [0, 0, 0.6, 0.4], reach: 0.2, every: 0.2, top: 0.3, seed: 2 }),
+      f1 = foot(),
+      f2 = foot();
+    ok(
+      'props: places at the foot of a wall are outside it, within reach, on the ground, and the same each time',
+      f1.length > 6 &&
+        f1.every(
+          q =>
+            Math.max(Math.abs(q.p[0]) - 0.6, Math.abs(q.p[2]) - 0.4) > 0 &&
+            Math.max(Math.abs(q.p[0]) - 0.6, Math.abs(q.p[2]) - 0.4) < 0.22 &&
+            Math.abs(q.p[1]) < 0.02
+        ) &&
+        JSON.stringify(f1) === JSON.stringify(f2),
+      f1.length + ' places'
+    );
+    const n0 = B.count(),
+      put = K.props.assign(S, K.props.starter, f1, { stone: { r: [1, 2, 3] }, leaf: { r: [5, 6, 7] } });
+    ok(
+      'props: a library puts only the things whose materials it was given, and they are made',
+      put.length === f1.length && put.every(d => ['pebble', 'stones', 'tuft'].includes(d.key)) && B.count() >= n0,
+      put.map(d => d.key).join(' ')
+    );
+    // paint-over: a decal handed to the builder is one more dab, of its colour, just in front of where it was painted
+    const B2 = A.makeBuilder(7, PALx),
+      c0 = B2.count();
+    globalThis.INK_DECAL_NEXT = [[0.5, 1, -0.25, 0, 0, 1, 8]];
+    const W2 = B2.finish({ detail: 20 });
+    ok(
+      'paint: a decal becomes one dab of its palette colour, pinned where it was painted',
+      W2.count === c0 + 1 &&
+        Math.abs(W2.data[2] + 0.25 - 0.3 / 20) < 1e-4 &&
+        W2.data[7] === 0x70 * 65536 + 0xd8 * 256 + 0xb0 &&
+        !globalThis.INK_DECAL_NEXT,
+      W2.count + ' dabs'
+    );
+  }
+  // ---- the sandbox (kq-sandbox): matter in a grid
+  {
+    const SB = K.sandbox,
+      run = (sim, n) => {
+        for (let i = 0; i < n; i++) sim.step();
+      },
+      room = () => {
+        const g = SB.grid({ at: [0, 0, 0], size: [3, 2, 3], cell: 0.1, seed: 3 });
+        g.box([0, 0, 0], [3, 0.3, 3], 'stone');
+        return g;
+      };
+    {
+      const g = room();
+      g.box([0.2, 0.3, 0.2], [1.2, 0.6, 1.2], 'lava');
+      g.box([0.2, 1.2, 0.2], [1.0, 1.5, 1.0], 'water');
+      g.box([1.8, 0.3, 1.8], [2.6, 0.9, 2.6], 'ice');
+      const sim = SB(g.spec());
+      let steam = 0;
+      for (let i = 0; i < 12; i++) {
+        run(sim, 10);
+        steam = Math.max(steam, sim.count('steam'));
+      }
+      ok(
+        'sandbox: water on lava makes steam and stone',
+        sim.count('basalt') > 50 && steam > 40,
+        sim.count('basalt') + ' stone, ' + steam + ' steam at most'
+      );
+      const ice0 = sim.count('ice');
+      sim.cast('flame', [2.2, 1.0, 2.2]);
+      run(sim, 120);
+      ok(
+        'sandbox: fire melts ice into water that runs off',
+        sim.count('ice') < ice0 && sim.count('water') > 0,
+        ice0 + ' -> ' + sim.count('ice')
+      );
+    }
+    {
+      const g = room();
+      g.box([0.2, 0.3, 0.2], [2.8, 0.6, 2.8], 'water');
+      g.box([0.2, 0.6, 0.2], [2.8, 0.7, 2.8], 'oil');
+      const sim = SB(g.spec());
+      run(sim, 30);
+      const w0 = sim.count('water'),
+        o0 = sim.count('oil');
+      sim.cast('flame', [0.6, 0.7, 0.6]);
+      let blaze = 0;
+      for (let i = 0; i < 30; i++) {
+        run(sim, 10);
+        blaze = Math.max(blaze, sim.count('blaze'));
+      }
+      ok(
+        'sandbox: an oil slick burns right across the water it floats on, and the water is still there',
+        o0 > 500 && sim.count('oil') < o0 * 0.1 && blaze > o0 * 0.5 && sim.count('water') > w0 * 0.8,
+        'oil ' + o0 + ' -> ' + sim.count('oil') + ', water ' + w0 + ' -> ' + sim.count('water')
+      );
+    }
+    {
+      const g = room();
+      g.box([1.3, 0.3, 1.3], [1.7, 1.6, 1.7], 'water');
+      const sim = SB(g.spec());
+      run(sim, 400);
+      let lone = 0,
+        all = 0;
+      for (let z = 0.05; z < 3; z += 0.1)
+        for (let x = 0.05; x < 3; x += 0.1) {
+          const q = sim.at([x, 0.35, z]);
+          if (!q || q.name !== 'water') continue;
+          all++;
+          if (
+            ![
+              [0.1, 0],
+              [-0.1, 0],
+              [0, 0.1],
+              [0, -0.1]
+            ].some(d => (sim.at([x + d[0], 0.35, z + d[1]]) || {}).name === 'water')
+          )
+            lone++;
+        }
+      ok(
+        'sandbox: spilt water spreads into one puddle, not scattered drops',
+        all > 150 && lone < all * 0.03,
+        lone + ' alone of ' + all
+      );
+    }
+    {
+      const g = room();
+      g.box([0, 1.85, 0], [3, 2, 3], 'stone');
+      g.box([1.0, 0.3, 1.0], [2.0, 0.5, 2.0], 'water');
+      g.heater({ at: [1.5, 0.35, 1.5], r: 0.6, temp: 400, rate: 0.3 });
+      const sim = SB(g.spec());
+      run(sim, 300);
+      let high = 0,
+        low = 0;
+      for (let z = 0.05; z < 3; z += 0.1)
+        for (let x = 0.05; x < 3; x += 0.1) {
+          if ((sim.at([x, 1.75, z]) || {}).name === 'steam') high++;
+          if ((sim.at([x, 1.0, z]) || {}).name === 'steam') low++;
+        }
+      ok(
+        'sandbox: boiled water rises as steam and gathers under the lid',
+        high > low && high > 20,
+        high + ' under the lid, ' + low + ' halfway'
+      );
+    }
+    {
+      const g = room();
+      g.box([1.0, 0.3, 1.0], [2.0, 0.6, 2.0], 'acid');
+      const sim = SB(g.spec()),
+        s0 = sim.count('stone');
+      let fumes = 0;
+      for (let i = 0; i < 30; i++) {
+        run(sim, 10);
+        fumes = Math.max(fumes, sim.count('fumes'));
+      }
+      ok(
+        'sandbox: acid eats the stone under it and gives off fumes',
+        sim.count('stone') < s0 && fumes > 5,
+        s0 - sim.count('stone') + ' eaten, ' + fumes + ' fumes at most'
+      );
+    }
+    {
+      const g = room();
+      g.box([1.2, 0.3, 1.2], [1.8, 0.6, 1.8], 'powder');
+      g.box([0.2, 0.3, 0.2], [2.8, 0.5, 0.6], 'sand');
+      const sim = SB(g.spec());
+      run(sim, 10);
+      sim.cast('flame', [1.5, 0.65, 1.5]);
+      let flew = 0;
+      for (let i = 0; i < 60; i++) {
+        sim.step();
+        flew = Math.max(flew, sim.stats().flying);
+      }
+      const b = sim.blasts();
+      ok(
+        'sandbox: black powder, lit, blows up, throws what is loose, and says so',
+        sim.count('powder') < 20 && flew > 50 && b.length >= 6,
+        b.length / 6 + ' blasts, ' + flew + ' flying'
+      );
+    }
+    {
+      // the scene's own solids: real stone to the grid, drawn by the scene until something happens to them
+      const g = SB.grid({ at: [0, 0, 0], size: [2, 1, 2], cell: 0.1 }),
+        sdf = (x, y) => y - 0.3;
+      g.walls(sdf, { as: (x, y, z) => (x < 1 ? 'stone' : 'wall') });
+      const spec = g.spec(),
+        sim = SB(spec),
+        blk = new Float32Array(4096 * 16);
+      sim.draw(blk, 4096);
+      let drawn = 0;
+      for (let s = 0; s < 4096; s++) if (blk[s * 16 + 3] > 0) drawn++;
+      ok(
+        "sandbox: the scene's solids are the grid's but not drawn by it",
+        sim.count('stone') > 100 && drawn === 0,
+        sim.count('stone') + ' stone, ' + drawn + ' drawn'
+      );
+      sim.explode([0.5, 0.3, 1], 0.35, 4);
+      run(sim, 5);
+      const u = sim.uncovered();
+      sim.draw(blk, 4096);
+      drawn = 0;
+      for (let s = 0; s < 4096; s++) if (blk[s * 16 + 3] > 0) drawn++;
+      sim.explode([1.5, 0.3, 1], 0.35, 4);
+      run(sim, 5);
+      let walls = 0;
+      for (let k = 0; k < 9; k++) if ((sim.at([1.3 + k * 0.05, 0.25, 1]) || { name: 'x' }).name === 'wall') walls++;
+      ok(
+        'sandbox: a blast hands the hole over to the grid, which draws its sides; wall stays wall',
+        u.length > 20 && drawn > 20 && walls === 9,
+        u.length + ' handed over, ' + drawn + ' drawn'
+      );
+      // and on a world: the scene's splats over the hole are put away, and come back when the grid starts again
+      const N0 = 600,
+        D = new Float32Array(N0 * 16);
+      for (let i = 0; i < N0; i++) {
+        D[i * 16] = 0.05 + (i % 20) * 0.1;
+        D[i * 16 + 1] = 0.3;
+        D[i * 16 + 2] = 0.05 + Math.floor(i / 20) * 0.1;
+        D[i * 16 + 3] = 3;
+      }
+      const W = { data: D, count: N0, sandbox: spec };
+      SB.attach(W, { budget: Infinity });
+      const st = W.anim;
+      let blasts = 0;
+      st.sandbox.onBlast(() => blasts++);
+      st.update(1 / 30, 0);
+      st.sandbox.cast('nova', [0.5, 0.35, 1]);
+      st.sandbox.cast('fist', [0.5, 0.35, 1]);
+      for (let k = 1; k < 20; k++) st.update(1 / 30, k / 30);
+      let gone = 0;
+      for (let i = 0; i < N0; i++) if (W.data[i * 16 + 3] === 0) gone++;
+      st.dispose();
+      let back = 0;
+      for (let i = 0; i < N0; i++) if (W.data[i * 16 + 3] === 3) back++;
+      ok(
+        "sandbox: attached, a blow puts away the scene's splats over the hole, tells who listens, and they come back",
+        gone > 0 && blasts > 0 && back === N0,
+        gone + ' put away, ' + blasts + ' blasts'
+      );
+    }
+    {
+      const mk = () => {
+        const g = room();
+        g.box([0.2, 0.3, 0.2], [1.2, 0.8, 1.2], 'sand');
+        g.box([1.5, 1.0, 1.5], [2.5, 1.5, 2.5], 'water');
+        return SB(g.spec());
+      };
+      const a = mk(),
+        b = mk();
+      run(a, 100);
+      run(b, 100);
+      a.cast('nova', [0.7, 0.9, 0.7]);
+      b.cast('nova', [0.7, 0.9, 0.7]);
+      run(a, 60);
+      run(b, 60);
+      ok(
+        'sandbox: the same seed runs the same',
+        a.count('sand') === b.count('sand') &&
+          a.count('water') === b.count('water') &&
+          a.stats().flying === b.stats().flying
+      );
+    }
   }
   console.log(fails ? fails + ' of ' + n + ' FAILED' : 'all ' + n + ' passed');
   return fails;

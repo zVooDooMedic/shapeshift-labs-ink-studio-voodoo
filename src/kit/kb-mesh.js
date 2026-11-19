@@ -44,11 +44,12 @@
     }
     return out;
   };
-  M.obj = (text, mtlText) => {
+  M.obj = (text, mtlText, { attributes = false } = {}) => {
     const P = [],
       C = [],
       T = [],
       TM = [],
+      uv = [], n = [], uvFaces = [], normalFaces = [],
       mats = [{ name: 'default', rgb: [0.7, 0.7, 0.7] }],
       lib = mtlText ? M.mtl(mtlText) : {};
     let cur = 0,
@@ -63,14 +64,33 @@
           C.push(+w[4], +w[5], +w[6]);
           anyCol = true;
         } else C.push(0.7, 0.7, 0.7);
-      } else if (w[0] === 'f') {
-        const ix = w.slice(1).map(s => {
-          const i = parseInt(s, 10);
-          return i < 0 ? P.length / 3 + i : i - 1;
-        });
-        for (let k = 1; k < ix.length - 1; k++) {
-          T.push(ix[0], ix[k], ix[k + 1]);
+      } else if (attributes && w[0] === 'vt') uv.push([+w[1], 1 - +w[2]]);
+      else if (attributes && w[0] === 'vn') n.push([+w[1], +w[2], +w[3]]);
+      else if (w[0] === 'f') {
+        const index = (value, size) => {
+          const i = parseInt(value, 10);
+          return i < 0 ? size + i : i - 1;
+        };
+        const tokens = w.slice(1), ix = tokens.map(s => index(s, P.length / 3));
+        const corners = attributes ? tokens.map(s => s.split('/')) : null;
+        let triplets = ix.slice(2).map((_, i) => [0, i + 1, i + 2]);
+        if (attributes && ix.length > 3) {
+          const points = ix.map(i => P.slice(i * 3, i * 3 + 3)), first = points[0];
+          let normal = [0, 0, 0];
+          for (const [i, p] of points.entries())
+            normal = K.V.add(normal, K.V.cross(K.V.sub(p, first), K.V.sub(points[(i + 1) % points.length], first)));
+          const axis = [0, 1, 2].reduce((a, b) => Math.abs(normal[b]) > Math.abs(normal[a]) ? b : a);
+          const flat = points.map(p => [p[(axis + 1) % 3], p[(axis + 2) % 3]]);
+          triplets = K.procedural.geometry.triangulate2D(flat);
+          if (normal[axis] < 0) triplets = triplets.map(tri => tri.slice().reverse());
+        }
+        for (const ids of triplets) {
+          T.push(...ids.map(i => ix[i]));
           TM.push(cur);
+          if (corners) {
+            uvFaces.push(ids.map(i => uv[index(corners[i][1], uv.length)]));
+            normalFaces.push(ids.map(i => n[index(corners[i][2], n.length)]));
+          }
         }
       } else if (w[0] === 'usemtl') {
         const name = w.slice(1).join(' ');
@@ -81,7 +101,12 @@
         }
       }
     }
-    return M.make(P, T, anyCol ? C : null, TM, mats);
+    const mesh = M.make(P, T, anyCol ? C : null, TM, mats);
+    if (attributes && T.length) {
+      if (uvFaces.every(face => face.every(Boolean))) mesh.uvs = uvFaces;
+      if (normalFaces.every(face => face.every(Boolean))) mesh.cornerNormals = normalFaces;
+    }
+    return mesh;
   };
   M.toObj = mesh => {
     const out = [],
@@ -164,7 +189,7 @@
       5126: [4, 'getFloat32', 1]
     },
     WIDTH = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
-  M.gltf = (json, bins) => {
+  M.gltf = (json, bins, { visitNode, visitPrimitive } = {}) => {
     const g = typeof json === 'string' ? JSON.parse(json) : json,
       bufs = (g.buffers || []).map((b, i) =>
         bins && bins[i]
@@ -212,6 +237,7 @@
     const walk = (ni, parent) => {
       const n = g.nodes[ni],
         m = mat4.mul(parent, mat4.trs(n));
+      if (visitNode && n.name !== undefined) visitNode(n.name, m.slice());
       if (n.mesh !== undefined)
         for (const pr of g.meshes[n.mesh].primitives) {
           if (pr.mode !== undefined && pr.mode !== 4) {
@@ -221,6 +247,7 @@
           const pa = acc(pr.attributes.POSITION),
             ca = pr.attributes.COLOR_0 !== undefined ? acc(pr.attributes.COLOR_0) : null,
             base = P.length / 3,
+            firstFace = TM.length,
             mi = useMat(pr.material),
             mrgb = mats[mi].rgb;
           for (let e = 0; e < pa.n; e++) {
@@ -254,6 +281,8 @@
               T.push(base + e, base + e + 1, base + e + 2);
               TM.push(mi);
             }
+          if (visitPrimitive) visitPrimitive(pr, { firstVertex:base, vertexCount:pa.n,
+            firstFace, faceCount:TM.length-firstFace, accessor:acc, matrix:m.slice() });
         }
       for (const c of n.children || []) walk(c, m);
     };
@@ -329,6 +358,16 @@
       p[i] = (p[i] - cx) * k + at[0];
       p[i + 1] = (p[i + 1] - y0) * k + at[1];
       p[i + 2] = (p[i + 2] - cz) * k + at[2];
+    }
+    if (mesh.sockets) {
+      const rotate = ([x, y, z]) => {
+        if (o.up === 'z') [y, z] = [z, -y];
+        return [x * c + z * s, y, -x * s + z * c];
+      };
+      const center = [cx, y0, cz];
+      out.sockets = Object.fromEntries(Object.entries(mesh.sockets).map(([id, socket]) => [
+        id, { p: rotate(socket.p).map((value, i) => (value - center[i]) * k + at[i]), dir: rotate(socket.dir) }
+      ]));
     }
     return out;
   };
@@ -424,6 +463,51 @@
       dy = apy - aby * v - acy * w,
       dz = apz - abz * v - acz * w;
     return dx * dx + dy * dy + dz * dz;
+  };
+  M.gridSampler = (lo, n, h, D) => {
+    const [n0, n1, n2] = n;
+    return (x, y, z) => {
+      let gx = (x - lo[0]) / h,
+        gy = (y - lo[1]) / h,
+        gz = (z - lo[2]) / h,
+        out = 0;
+      if (gx < 0) {
+        out += gx * gx;
+        gx = 0;
+      } else if (gx > n0 - 1) {
+        out += (gx - n0 + 1) * (gx - n0 + 1);
+        gx = n0 - 1;
+      }
+      if (gy < 0) {
+        out += gy * gy;
+        gy = 0;
+      } else if (gy > n1 - 1) {
+        out += (gy - n1 + 1) * (gy - n1 + 1);
+        gy = n1 - 1;
+      }
+      if (gz < 0) {
+        out += gz * gz;
+        gz = 0;
+      } else if (gz > n2 - 1) {
+        out += (gz - n2 + 1) * (gz - n2 + 1);
+        gz = n2 - 1;
+      }
+      const i = Math.min(n0 - 2, gx | 0),
+        j = Math.min(n1 - 2, gy | 0),
+        k = Math.min(n2 - 2, gz | 0),
+        fx = gx - i,
+        fy = gy - j,
+        fz = gz - k,
+        q = i + n0 * (j + n1 * k),
+        q2 = q + n0 * n1;
+      const c00 = D[q] + (D[q + 1] - D[q]) * fx,
+        c10 = D[q + n0] + (D[q + n0 + 1] - D[q + n0]) * fx,
+        c01 = D[q2] + (D[q2 + 1] - D[q2]) * fx,
+        c11 = D[q2 + n0] + (D[q2 + n0 + 1] - D[q2 + n0]) * fx,
+        c0 = c00 + (c10 - c00) * fy,
+        c1 = c01 + (c11 - c01) * fy;
+      return c0 + (c1 - c0) * fz + (out > 0 ? Math.sqrt(out) * h : 0);
+    };
   };
   M.field = (mesh, o) => {
     o = o || {};
@@ -570,48 +654,7 @@
       D[i] = s;
     }
     const hi = [lo[0] + (n0 - 1) * h, lo[1] + (n1 - 1) * h, lo[2] + (n2 - 1) * h];
-    const sd = (x, y, z) => {
-      let gx = (x - lo[0]) / h,
-        gy = (y - lo[1]) / h,
-        gz = (z - lo[2]) / h,
-        out = 0;
-      if (gx < 0) {
-        out += gx * gx;
-        gx = 0;
-      } else if (gx > n0 - 1) {
-        out += (gx - n0 + 1) * (gx - n0 + 1);
-        gx = n0 - 1;
-      }
-      if (gy < 0) {
-        out += gy * gy;
-        gy = 0;
-      } else if (gy > n1 - 1) {
-        out += (gy - n1 + 1) * (gy - n1 + 1);
-        gy = n1 - 1;
-      }
-      if (gz < 0) {
-        out += gz * gz;
-        gz = 0;
-      } else if (gz > n2 - 1) {
-        out += (gz - n2 + 1) * (gz - n2 + 1);
-        gz = n2 - 1;
-      }
-      const i = Math.min(n0 - 2, gx | 0),
-        j = Math.min(n1 - 2, gy | 0),
-        k = Math.min(n2 - 2, gz | 0),
-        fx = gx - i,
-        fy = gy - j,
-        fz = gz - k,
-        q = i + n0 * (j + n1 * k),
-        q2 = q + n0 * n1;
-      const c00 = D[q] + (D[q + 1] - D[q]) * fx,
-        c10 = D[q + n0] + (D[q + n0 + 1] - D[q + n0]) * fx,
-        c01 = D[q2] + (D[q2 + 1] - D[q2]) * fx,
-        c11 = D[q2 + n0] + (D[q2 + n0 + 1] - D[q2 + n0]) * fx,
-        c0 = c00 + (c10 - c00) * fy,
-        c1 = c01 + (c11 - c01) * fy;
-      return c0 + (c1 - c0) * fz + (out > 0 ? Math.sqrt(out) * h : 0);
-    };
+    const sd = M.gridSampler(lo, n, h, D);
     const tri = (x, y, z) =>
       near[
         Math.max(0, Math.min(n0 - 1, Math.round((x - lo[0]) / h))) +

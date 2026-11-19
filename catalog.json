@@ -1,5 +1,5 @@
 {
-  "about": "What the ink-studio toolkit can do. kind: cli = an ink-studio command, solid/material/op = sculpting, rig = animation, fx = per-splat effects. status ready = built, planned = wanted and not built.",
+  "about": "What the ink-studio toolkit can do. CLI entries describe commands, API entries describe package interfaces, and other kinds group authoring tools and effects. Ready entries are implemented.",
   "entries": [
     {
       "id": "studio.render",
@@ -13,6 +13,22 @@
         "preview",
         "screenshot",
         "headless"
+      ]
+    },
+    {
+      "id": "studio.webgl",
+      "kind": "api",
+      "status": "ready",
+      "title": "Render an Ink Studio world into a WebGL 2 canvas",
+      "what": "The browser package entry draws packed splats with palette and tone resolution, per-pixel materials, and optional edge sprites. The default uses a specialized resolve and reuses stable order on unchanged frames.",
+      "use": "createRenderer(canvas, { toolkit: { KIT, PixelLook } }).render(world, { time: 0 })",
+      "where": "webgl.mjs, src/webgl/renderer.mjs",
+      "example": "docs/browser-renderer.md",
+      "tags": [
+        "browser",
+        "gpu",
+        "webgl",
+        "preview"
       ]
     },
     {
@@ -71,7 +87,7 @@
       "kind": "cli",
       "status": "ready",
       "title": "Counts, colours, cost, warnings",
-      "what": "Splat counts by kind, extent, build time, animation cost per frame and megabytes uploaded, share of the picture each palette colour takes.",
+      "what": "Splat counts by kind, extent, build time, animation cost per frame and estimated graphics uploads, and the share of the picture each palette colour takes.",
       "use": "ink-studio stats <id>",
       "tags": [
         "budget",
@@ -98,7 +114,7 @@
       "status": "ready",
       "title": "Try a model on its own",
       "what": "Every command takes a file in place of an id: module.exports = kit => ({ id, name, seed, build }) where kit has makeBuilder, makeSculpt, basis, pondMat, motes. Build and render one creature in isolation.",
-      "use": "ink-studio render lab/thing.js",
+      "use": "ink-studio render lab/example.js",
       "example": "lab/example.js",
       "tags": [
         "sandbox",
@@ -1254,6 +1270,106 @@
         "creature",
         "reaction"
       ]
+    },
+    {
+      "id": "look.edge-sprites",
+      "kind": "material",
+      "status": "ready",
+      "title": "Surface-anchored edge sprites",
+      "what": "Tiny pixel sprites attach to fixed surface points and appear beyond the silhouette. The same points are kept as the scene changes detail level.",
+      "use": "K.pixel.edge(material, { up: 'grass', every: 5, share: 0.55 })",
+      "where": "src/kit/kpz-sprite.js and cli/render.js",
+      "tags": ["pixel art", "sprite", "tuft", "silhouette"]
+    },
+    {
+      "id": "look.surface",
+      "kind": "material",
+      "status": "ready",
+      "title": "View-dependent surface finishes",
+      "what": "Compose directional roughness, fibre highlights, grazing reflection, sheen, thin-film colour, diffraction, directional tint and anchored glints. Forty editable presets use the same layer settings.",
+      "use": "K.surface.preset('brushed-steel', { r: [1, 2, 3] }, { direction: 'y' })",
+      "where": "docs/surface-materials.md",
+      "tags": ["material", "anisotropy", "iridescence", "specular", "glints"]
+    },
+    {
+      "id": "look.planar-reflection",
+      "kind": "material",
+      "status": "ready",
+      "title": "Planar reflections and ripple emitters",
+      "what": "Render the world around a named mirror plane and distort it with surface normal variation. Drop sources add travelling rings after the scene is baked.",
+      "use": "K.reflection.plane({ id: 'pool' }) · K.reflection.material(base, 'pool') · K.ripple.field(options)",
+      "where": "docs/scene-optics.md",
+      "tags": ["water", "reflection", "mirror", "ripples", "normal"]
+    },
+    {
+      "id": "look.atmosphere-volumes",
+      "kind": "op",
+      "status": "ready",
+      "title": "Height fog, mist volumes and light shafts",
+      "what": "Integrate world-space fog, local spheres and boxes, and tinted beams along the camera ray up to the nearest opaque surface.",
+      "use": "B.finish({ cam, atmosphere: [K.atmosphere.fog({ top: 0.4 }), K.atmosphere.sphere({ at, radius })] })",
+      "where": "docs/scene-optics.md",
+      "tags": ["atmosphere", "mist", "fog", "shaft", "depth"]
+    },
+    {
+      "id": "convert.signed-field",
+      "kind": "op",
+      "status": "ready",
+      "title": "Signed fields into meshes and splats",
+      "what": "Polygonize a bounded signed-distance function, use it in an existing sculpt, or bake it into a splat world with a fitted camera.",
+      "use": "K.sdf.toMesh(sd, { bounds }) · K.sdf.solid(S, sd, mat, { bounds }) · K.sdf.toSplats(sd, { bounds })",
+      "where": "docs/depth-maps.md",
+      "tags": ["sdf", "mesh", "splats", "conversion"]
+    },
+    {
+      "id": "place.props",
+      "kind": "op",
+      "status": "ready",
+      "title": "Seeded prop placement",
+      "what": "Reusable libraries place small objects in an area, along a path, around a solid or at the foot of a wall. Each library uses roles to map its props to the scene materials.",
+      "use": "K.props.clutter(S, K.props.starter, materials, rules)",
+      "where": "src/kit/kpy-props.js",
+      "tags": ["scatter", "props", "decoration", "path"]
+    },
+    {
+      "id": "studio.paint",
+      "kind": "cli",
+      "status": "ready",
+      "title": "Paint surface-pinned decals",
+      "what": "Export a per-pixel view and its surface coordinates, then turn edited pixels into palette-colored decals that stay in place from every camera angle.",
+      "use": "ink-studio paint export <scene> and ink-studio paint absorb <scene>",
+      "where": "cli/ink-studio.js and src/builder.js",
+      "tags": ["paint", "decal", "pixel art"]
+    },
+    {
+      "id": "studio.pixel-critique",
+      "kind": "cli",
+      "status": "ready",
+      "title": "Measure pixel-art renders",
+      "what": "Check isolated pixels and unwanted shading patterns, review fixed camera angles, compare a reference or measure flicker as the view moves.",
+      "use": "ink-studio lint <scene> or ink-studio shimmer <scene> --mode orbit",
+      "where": "cli/crisp.js and cli/critic.js",
+      "tags": ["lint", "crisp", "compare", "review", "shimmer"]
+    },
+    {
+      "id": "import.depth",
+      "kind": "op",
+      "status": "ready",
+      "title": "Depth maps into splats, signed fields and meshes",
+      "what": "Unproject a calibrated raster, preserve holes and depth breaks, project an optional RGB image, and build a backed closed solid from the visible surface.",
+      "use": "ink-studio depth input.png --image aligned.png",
+      "where": "docs/depth-maps.md",
+      "tags": ["depth", "mesh", "sdf", "splats", "projection", "import"]
+    },
+    {
+      "id": "sim.sandbox",
+      "kind": "op",
+      "status": "ready",
+      "title": "Cellular material sandbox",
+      "what": "A seeded grid simulates liquids, powders, gases, heat and phase changes. The simulation can run in a worker and draw its cells as splats.",
+      "use": "const grid = K.sandbox.grid({ at, size, cell }); const sim = K.sandbox(grid.spec())",
+      "where": "src/kit/kq-sandbox.js",
+      "tags": ["simulation", "heat", "matter", "worker"]
     },
     {
       "id": "chance.seeded",

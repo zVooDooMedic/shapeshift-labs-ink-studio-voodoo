@@ -82,7 +82,7 @@ function makeNoise(seed) {
 }
 
 // ---------------- shared builder: splat storage plus shape helpers ----------------
-function makeBuilder(seed, hex) {
+function makeBuilder(seed, hex, { renderMetadata = true } = {}) {
   seed = seed >>> 0;
   let gen = mulberry32(seed ^ 0x5bd1e995);
   const R = () => gen(),
@@ -129,6 +129,53 @@ function makeBuilder(seed, hex) {
     cidx = [],
     nrms = [];
   let curN = null;
+  let ownerRows, materialRows, muteEmission;
+  let unnamedOwners = new WeakMap(), unnamedMaterials = new WeakMap();
+  const ownerIds = new Map(), materialIds = new Map();
+  const ownerNames = [null], materialNames = [null];
+  function renderId(value, labels, unnamed, names) {
+    if (value == null) return 0;
+    const hasLabel = typeof value === 'string' || typeof value === 'number';
+    const ids = hasLabel ? labels : unnamed;
+    let id = ids.get(value);
+    if (id === undefined) {
+      id = names.length;
+      ids.set(value, id);
+      names.push(hasLabel ? value : null);
+    }
+    return id;
+  }
+  // Labels can be shared across several solids or supplied for splats built directly.
+  function describeSplats(first, end, { object, material } = {}) {
+    if (!renderMetadata || first === end) return;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(end) || first < 0 || end < first || end > n)
+      throw new RangeError('Splat metadata range must belong to the builder');
+    if (!ownerRows || ownerRows.length < cap) {
+      const owners = new Uint32Array(cap), materials = new Uint32Array(cap);
+      if (ownerRows) {
+        owners.set(ownerRows);
+        materials.set(materialRows);
+      }
+      ownerRows = owners;
+      materialRows = materials;
+    }
+    ownerRows.fill(renderId(object, ownerIds, unnamedOwners, ownerNames), first, end);
+    materialRows.fill(renderId(material, materialIds, unnamedMaterials, materialNames), first, end);
+  }
+
+  function renderRows() {
+    if (!renderMetadata) return undefined;
+    const normals = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) if (nrms[i]) normals.set(nrms[i], i * 3);
+    return {
+      normals,
+      muteEmission: muteEmission?.slice(0, n),
+      objectIds: ownerRows?.slice(0, n),
+      materialIds: materialRows?.slice(0, n),
+      objects: ownerNames.slice(),
+      materials: materialNames.slice()
+    };
+  }
   /* the birth time given to the dabs laid next (null: there from the start). The motions that use the last number for themselves
      (falling, rising, flapping, swelling, writhing, a placed copy's sway) cannot grow */
   let bornV = null,
@@ -139,7 +186,83 @@ function makeBuilder(seed, hex) {
      tile on the surface, and the colour the dab was given, so a dab recoloured later is known and drawn plain. */
   let fine = null,
     attr = null,
-    attrN = null;
+    attrN = null,
+    pix = null,
+    pixHas = false,
+    surfaceData = null,
+    surfacePending = false;
+  const surfaces = [],
+    surfaceIds = new Map(),
+    surfaceRow = new Float32Array(SurfaceLook.STRIDE);
+  function surfaceNext(settings, nx, ny, nz, light, visibility = 1, tangent) {
+    let ids = surfaceIds.get(settings);
+    if (!ids) surfaceIds.set(settings, (ids = new Map()));
+    const key = light.join(',');
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = surfaces.push({ settings, light: Array.from(light) });
+      ids.set(key, id);
+    }
+    surfaceRow.set([id, nx, ny, nz, visibility, tangent?.[0] ?? 0, tangent?.[1] ?? 0, tangent?.[2] ?? 0]);
+    surfacePending = true;
+  }
+  /* colour worked out per pixel (a diorama's look.pixel): for a dab laid next, the ramp it is coloured from, how lit it is, the pattern
+     laid on it (a K.pixel material's pat) and the way its surface faces; the picture then decides each pixel from these, not from the
+     dab's one colour. Eight numbers a dab; the ramps and patterns are kept once each */
+  const pixN = new Float32Array(8),
+    ramps = [],
+    rampOff = [],
+    rampIx = new Map(),
+    rampNoIx = new Map(),
+    rampByText = new Map(),
+    pats = [],
+    patIx = new Map();
+  /* (fx, fy, fz: the way the shape it is lit as faces, if that is not its own: folded into two numbers; 9, 9 when there is none.
+      noLine: the material draws no outline, as clouds and water. Ramps with the same colours are one ramp, so an outline is drawn
+      only where one material meets another) */
+  const pixNext = (ramp, t, pat, nx, ny, nz, fx, fy, fz, noLine) => {
+    const ix = noLine ? rampNoIx : rampIx;
+    let r = ix.get(ramp);
+    if (r === undefined) {
+      const text = (noLine ? '!' : '') + Array.from(ramp).join(',');
+      r = rampByText.get(text);
+      if (r === undefined) {
+        r = ramps.push(Array.from(ramp)) - 1;
+        rampOff.push(!!noLine);
+        rampByText.set(text, r);
+      }
+      ix.set(ramp, r);
+    }
+    let pi = 0;
+    if (pat) {
+      pi = patIx.get(pat);
+      if (pi === undefined) {
+        pi = pats.push(pat);
+        patIx.set(pat, pi);
+      }
+    }
+    pixN[0] = r + 1;
+    pixN[1] = t;
+    pixN[2] = pi;
+    pixN[3] = nx;
+    pixN[4] = ny;
+    pixN[5] = nz;
+    if (fx === undefined) pixN[6] = pixN[7] = 9;
+    else {
+      const l = Math.abs(fx) + Math.abs(fy) + Math.abs(fz) || 1;
+      let a = fx / l,
+        b = fz / l;
+      if (fy < 0) {
+        const a2 = (1 - Math.abs(b)) * (a >= 0 ? 1 : -1),
+          b2 = (1 - Math.abs(a)) * (b >= 0 ? 1 : -1);
+        a = a2;
+        b = b2;
+      }
+      pixN[6] = a;
+      pixN[7] = b;
+    }
+    pixHas = true;
+  };
   /* attributes (see the sculptor's S.keepAttrs): four numbers a dab, for the dabs laid next */
   const attrNext = (a, b, c, d) => {
     attrN = attrN || new Float32Array(4);
@@ -183,6 +306,26 @@ function makeBuilder(seed, hex) {
       }
       attr.set(attrN, n * 4);
     }
+    if (pixHas || pix) {
+      if (!pix || pix.length < cap * 8) {
+        const f = new Float32Array(cap * 8);
+        if (pix) f.set(pix);
+        pix = f;
+      }
+      if (pixHas) pix.set(pixN, n * 8);
+      else pix.fill(0, n * 8, n * 8 + 8);
+      pixHas = false;
+    }
+    if (surfacePending || surfaceData) {
+      const stride = SurfaceLook.STRIDE;
+      if (!surfaceData || surfaceData.length < cap * stride) {
+        const next = new Float32Array(cap * stride);
+        if (surfaceData) next.set(surfaceData);
+        surfaceData = next;
+      }
+      if (surfacePending) surfaceData.set(surfaceRow, n * stride);
+      surfacePending = false;
+    }
     if (fine && fine[n * 12 + 11] === 1)
       fine[n * 12 + 11] = 2; // the tile laid for this dab is now its own
     else if (fine && n * 12 < fine.length) fine.fill(0, n * 12, n * 12 + 12);
@@ -201,9 +344,21 @@ function makeBuilder(seed, hex) {
     cidx.push(P.indexOf(col));
     nrms.push(curN);
     if (an) {
+      if (renderMetadata && an.em && an.emission === false) {
+        if (!muteEmission || muteEmission.length < cap) {
+          const next = new Uint8Array(cap);
+          if (muteEmission) next.set(muteEmission);
+          muteEmission = next;
+        }
+        muteEmission[n] = 1;
+      }
       // kind, plus flags: 16 = leave out of outlines, 32 = glows (ignores haze and relighting)
-      // + 64 = draw behind everything (used for water, so reflections show through it)
-      data[o + 11] = (an.k || 0) + (an.nd ? 16 : 0) + (an.em ? 32 : 0) + (an.bk ? 64 : 0) + (an.gl ? 256 : 0); // (256 = glass: it bends what is seen through it)
+      // 64 = behind everything, 256 = glass, 8192 = responds to horizontal airflow, 2048 = drawn as text where a page offers it
+      // (K.ascii), with its own set in 4096 and 16384 (as: 1 ascii, 2 symbols, 3 braille; as: true, the page's)
+      const asSet = an.as && an.as !== true ? Math.max(0, Math.min(3, an.as | 0)) : 0;
+      data[o + 11] = (an.k || 0) + (an.nd ? 16 : 0) + (an.em ? 32 : 0) + (an.bk ? 64 : 0) + (an.gl ? 256 : 0) + (an.wind ? 8192 : 0)
+        + (an.as ? 2048 + (asSet & 1 ? 4096 : 0) + (asSet & 2 ? 16384 : 0) : 0)
+        + (an.coverage === undefined ? 0 : SampleCoverage.pack(an.coverage));
       if (an.bk) back.push(n);
       data[o + 12] = an.ph || 0;
       data[o + 13] = an.sp || 0;
@@ -766,11 +921,28 @@ function makeBuilder(seed, hex) {
     stick(x, y, z, UP, s2, s2 * 0.12 + 0.012, P[c], 3, an);
   }
   function finish(meta) {
-    return Object.assign(
+    /* paint-over decals (ink-studio paint): pixels painted over a view of the diorama, each pinned where it fell on the surface, as a
+       flat dab one pixel across of that palette colour just in front of it. Whatever builds the diorama puts its decals in
+       INK_DECAL_NEXT as [x, y, z, nx, ny, nz, palette index] (the game's build embeds them as INK_PAINT, by diorama) */
+    const dec = typeof globalThis !== 'undefined' ? globalThis.INK_DECAL_NEXT : null;
+    if (dec && dec.length) {
+      globalThis.INK_DECAL_NEXT = null;
+      const px = 1 / ((meta && meta.detail) || 12);
+      for (const [x, y, z, nx, ny, nz, c] of dec)
+        if (P[c])
+          disc(x + nx * px * 0.3, y + ny * px * 0.3, z + nz * px * 0.3, [nx, ny, nz], px * 0.6, px * 0.12, P[c], 3);
+    }
+    const world = Object.assign(
       {
         data: data.subarray(0, n * 16),
         count: n,
+        renderMetadata: renderRows(),
         attr: attr ? Float32Array.from({ length: n * 4 }, (_, i) => attr[i] || 0) : undefined,
+        pix: pix ? Float32Array.from({ length: n * 8 }, (_, i) => pix[i] || 0) : undefined,
+        ramps: pix ? ramps.map(r => r.slice()) : undefined,
+        rampOff: pix ? rampOff.slice() : undefined,
+        pats: pix ? pats.slice() : undefined,
+        ...(surfaceData ? { surfaceData: surfaceData.slice(0, n * SurfaceLook.STRIDE), surfaces: surfaces.slice() } : {}),
         fine: fine
           ? fine.length >= n * 12
             ? fine.subarray(0, n * 12)
@@ -789,6 +961,8 @@ function makeBuilder(seed, hex) {
       },
       meta
     );
+    if (world.surfaceEffects) world.surfaceEffects = KIT.splatEffects.context(world.surfaceEffects);
+    return world;
   }
   // hand over everything pushed so far and start again empty
   const take = () => {
@@ -797,9 +971,21 @@ function makeBuilder(seed, hex) {
     fine = null;
     attr = null;
     attrN = null;
+    pix = null;
+    pixHas = false;
+    surfaceData = null;
+    surfacePending = false;
+    surfaces.length = 0;
+    surfaceIds.clear();
     bounced = 0;
     cidx.length = 0;
     nrms.length = 0;
+    ownerRows = materialRows = muteEmission = undefined;
+    unnamedOwners = new WeakMap();
+    unnamedMaterials = new WeakMap();
+    ownerIds.clear();
+    materialIds.clear();
+    ownerNames.length = materialNames.length = 1;
     moving.length = 0;
     back.length = 0;
     return out;
@@ -824,10 +1010,13 @@ function makeBuilder(seed, hex) {
   };
   return {
     count: () => n,
+    describeSplats: renderMetadata ? describeSplats : undefined,
     born: v => (bornV = v === undefined || v === null || !isFinite(v) ? null : v),
     wet: v => (wetV = v === undefined || v === null || !isFinite(v) ? null : v),
     fineTile,
     attrNext,
+    pixNext,
+    surfaceNext,
     dabAt,
     reseed,
     take,

@@ -56,3 +56,31 @@ test('native-grid interior details survive even when supersamples prefer another
   for (let i = 0; i < 16; i++) assert.deepEqual(Array.from(image.rgb.slice(i * 3, i * 3 + 3)), i % 2 ? [230, 213, 162] : [51, 153, 34]);
   assert.equal(image.use[1], 8); assert.equal(image.use[2], 8);
 });
+
+test('tone stops control black coverage, color selection and Bayer stipple independently', () => {
+  const settings = { cutoff: 0.2, stops: [[0, '#000000'], [0.5, '#1234ff'], [1, '#ff9500']] };
+  const tone = look.prepareTone(settings);
+  const cell = (value, x = 0, y = 0) => look.toneIndex(tone, value, value, value, x, y);
+  assert.deepEqual(tone.palette, [0x000000, 0x1234ff, 0xff9500]);
+  assert.equal(cell(0.2), 0);
+  assert.equal(cell(0.6, 0, 3), 1);
+  assert.equal(cell(1, 0, 3), 2);
+  const tile = Array.from({ length: 16 }, (_, i) => cell(0.4, i % 4, i >> 2));
+  assert.equal(tile.filter(index => index === 1).length, 8);
+  assert.equal(cell(0.4, 4, 4), tile[0]);
+  const flat = look.prepareTone({ ...settings, amount: 0 });
+  assert.equal(look.toneIndex(flat, 0.45, 0.45, 0.45, 0, 0), 1);
+  assert.equal(look.toneIndex(flat, 0.45, 0.45, 0.45, 0, 3), 1);
+});
+
+test('tone mode reuses the seeded void-and-cluster tile', () => {
+  const { PixelLook, KIT } = require('..').load();
+  const blueNoise = KIT.procedural.materials.blueNoise;
+  const settings = { pattern: 'blue-noise', seed: 17 };
+  const tone = PixelLook.prepareTone(settings, blueNoise);
+  const tile = blueNoise({ seed: 17 });
+  assert.equal(tone.width, tile.width);
+  assert.equal(tone.height, tile.height);
+  assert.deepEqual(tone.thresholds, Float32Array.from(tile.ranks, rank => (rank + 0.5) / tile.ranks.length));
+  assert.notDeepEqual(tone.thresholds, PixelLook.prepareTone({ ...settings, seed: 18 }, blueNoise).thresholds);
+});

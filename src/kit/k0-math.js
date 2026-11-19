@@ -213,6 +213,9 @@ const KIT = {};
     },
     step: x => (x < 1 ? 0 : 1)
   });
+  // A signed offset for squash and stretch that starts and ends at zero.
+  K.wobble = (t, cycles = 2) => (t > 0 && t < 1 ? Math.sin(K.TAU * cycles * t) * (1 - t) ** 2 : 0);
+
   // a value that passes through (when, what) pairs, easing between them. K.kf(p, [0, 0, 0.5, 1, 1, 0]) ; an ease name may follow any pair: [0, 0, 0.5, 1, 'back', 1, 0]
   K.kf = (p, keys) => {
     let pt = keys[0],

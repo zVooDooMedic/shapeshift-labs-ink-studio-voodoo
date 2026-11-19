@@ -2,8 +2,9 @@
   "name": "@shapeshift-labs/ink-studio",
   "version": "0.1.0",
   "private": true,
-  "description": "Headless lab for SDF sculpting, voxel memory and pixel-art gaussian splats",
+  "description": "SDF sculpting and pixel-art Gaussian splats with browser and headless renderers",
   "main": "index.js",
+  "browser": "./webgl.mjs",
   "bin": {
     "ink-studio": "cli/ink-studio.js"
   },

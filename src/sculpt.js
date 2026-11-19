@@ -5,13 +5,14 @@
    the combined surface, and coloured from a material ramp using the
    surface normal, a cast shadow, ambient occlusion and nearby lamps.
    ------------------------------------------------------------------ */
-function makeSculpt(B) {
+function makeSculpt(B, rest) {
   const { P, n3, fbm, disc, stick, fib, TAU, clamp, norm, R } = B;
-  const pos = [],
-    neg = [],
+  const pos = rest?.positive || [],
+    neg = rest?.negative || [],
     ghosts = [],
     g3 = [0, 0, 0],
     EM = { em: true },
+    GLINT = { em: true, emission: false },
     VIEW0 = [0, 0.34, 0.94],
     FSEG = [0.38, 0.34, 0.28],
     FWID = [1, 0.75, 0.5],
@@ -38,6 +39,7 @@ function makeSculpt(B) {
     /* inked detail: 0 is off. Set to 1 and every plain dab also carries a 4 by 4 picture of the surface under it (its pattern, the
        edge of a shadow, the edge of the next thing along), which the page looks up for each pixel when its Inked detail option is on */
     fine: typeof globalThis !== 'undefined' && globalThis.INK_FINE ? 1 : 0,
+    pixel: typeof globalThis !== 'undefined' && !!globalThis.INK_PIXEL,
     /* bounce light: null is off. { k, reach, rays, glow } and, after each bake, every dab is also lit by the lit things round it, in
        their colours (B.bounce). The page's Bounce light option sets it for a whole diorama so the two looks can be compared */
     bounce: typeof globalThis !== 'undefined' && globalThis.INK_BOUNCE ? {} : null,
@@ -69,6 +71,7 @@ function makeSculpt(B) {
   S.grp = k => ({ g: gid++, k }); // members of a group melt into each other over distance k
   S.pick = (ramp, t) => ramp[clamp(Math.floor(t * ramp.length), 0, ramp.length - 1)];
 
+  let hasOptionalProxy = false;
   function add(p, mat, o) {
     o = o || {};
     p.mat = Array.isArray(mat) ? { r: mat } : mat || {};
@@ -77,13 +80,20 @@ function makeSculpt(B) {
     p.g = o.g || gid++;
     p.bump = o.bump || null;
     p.tag = o.tag || null;
+    p.renderOwner = o.objectId ?? p.tag;
+    p.model = o.model;
     if (p.bump) p.br += p.bump[0];
     p.reach = o.reach || 0;
     p.whole = !!o.whole;
+    if (o.lowerBound !== undefined) {
+      if (typeof o.lowerBound !== 'function') throw new Error('A field lower bound must be a function');
+      p.lowerBound = o.lowerBound;
+    }
     if (o.born !== undefined) p.born = o.born;
     if (o.hold) return p; // held: made to be combined into another solid, not drawn by itself
     if (S.collide && (o.ghost || (p.mat.skip && !p.mat.solid))) return p; // when only what can be walked on matters, leave out what is drawn but not solid
     (o.ghost ? ghosts : o.neg ? neg : pos).push(p);
+    if (p.mat.omitFromProxy && !o.ghost && !o.neg) hasOptionalProxy = true;
     return p;
   }
   // a solid defined in its own space: centred on c, optionally turned by the frame o.ax
@@ -128,7 +138,7 @@ function makeSculpt(B) {
       ry = r.length ? r[1] : r,
       rz = r.length ? r[2] : r,
       sph = rx === ry && ry === rz;
-    return local(
+    const solid = local(
       c,
       Math.max(rx, ry, rz),
       (x, y, z) => {
@@ -153,6 +163,8 @@ function makeSculpt(B) {
       mat,
       o
     );
+    solid.analytic = { kind: 'ellipsoid', center: c, radii: [rx, ry, rz], frame: o?.ax };
+    return solid;
   };
   // box: c is the centre, h the half-sizes, o.rd rounds the edges
   S.box = (c, h, mat, o) => {
@@ -228,8 +240,8 @@ function makeSculpt(B) {
     );
   };
   // ring lying flat (turn it with o.ax)
-  S.torus = (c, R, r, mat, o) =>
-    local(
+  S.torus = (c, R, r, mat, o) => {
+    const solid = local(
       c,
       R + r,
       (x, y, z) => Math.hypot(Math.hypot(x, z) - R, y) - r,
@@ -247,6 +259,9 @@ function makeSculpt(B) {
       mat,
       o
     );
+    solid.analytic = { kind: 'torus', center: c, major: R, minor: r, frame: o?.ax };
+    return solid;
+  };
   // limb or branch through a list of points; radius goes r0 -> r1, or is a function of 0..1
   S.tube = (pts, r0, r1, mat, o) => {
     const rf = typeof r0 === 'function' ? r0 : t => r0 + (r1 - r0) * t,
@@ -473,7 +488,7 @@ function makeSculpt(B) {
           }
     }
   }
-  function field(x, y, z) {
+  function field(x, y, z, exclude, proxyOnly) {
     let d = 1e9,
       gd = 1e9,
       cur = -1,
@@ -488,6 +503,7 @@ function makeSculpt(B) {
       list = grid[(ix * gdim[1] + iy) * gdim[2] + iz] || always;
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
+      if (p === exclude || proxyOnly && p.mat.omitFromProxy) continue;
       if (p.g !== cur) {
         if (gd < d) {
           d = gd;
@@ -505,7 +521,13 @@ function makeSculpt(B) {
           dz = z - p.bc[2];
         if (m <= 0 || dx * dx + dy * dy + dz * dz > m * m) continue;
       }
+      if (p.lowerBound) {
+        const limit = Math.min(d,gd) + gk + (p.bump ? p.bump[0] : 0) + 1e-9;
+        if (p.lowerBound(x,y,z,limit) > limit) continue;
+      }
       const pd = psd(p, x, y, z);
+      // A distance function may be undefined outside its solid. Keep that sample out of the smooth union.
+      if (Number.isNaN(pd)) continue;
       if (gk > 0 && gd < 1e8) {
         const h = Math.max(gk - Math.abs(gd - pd), 0) / gk;
         if (pd < gd) go = p;
@@ -690,6 +712,15 @@ function makeSculpt(B) {
     B.wet(wt === undefined || wt === null ? null : typeof wt === 'function' ? wt(x, y, z, ny) : wt);
     let AA = null;
     if (!PRB) LLS.length = 0;
+    /* form: the shape this is lit as, not the one it has (a crown lit as the few balls it is made of, a rock as its flat faces):
+       m.form(x, y, z, nx, ny, nz) -> [nx, ny, nz], or nothing to keep its own */
+    const gx = nx,
+      gy = ny,
+      gz = nz;
+    if (m.form) {
+      const f = m.form(x, y, z, nx, ny, nz);
+      if (f) ((nx = f[0]), (ny = f[1]), (nz = f[2]));
+    }
     let ramp = m.rf ? m.rf(x, y, z) || m.r : m.r,
       t,
       ao = 1,
@@ -889,8 +920,9 @@ function makeSculpt(B) {
     }
     /* a wet or polished thing has a small hard highlight where it mirrors the sun to the eye. The eye is taken to be at S.view (set it to the
        way the camera looks from); gloss: { c (palette index), at (how small: 0.95), c2 and at2 (a dimmer ring round it) } */
+    const surface = m.surface === undefined ? m0.surface : m.surface;
     let glint = false;
-    if (m.gloss && !m.em && !flat) {
+    if (m.gloss && !surface && !m.em && !flat) {
       const g = m.gloss,
         vw = S.view || VIEW0,
         hx = L[0] + vw[0],
@@ -907,7 +939,7 @@ function makeSculpt(B) {
     }
     if (PRB) return ci;
     const fl =
-      FLO || m.fl || (m.em || glint ? EM : (m.leaf || m.blade) && !m.still ? (m.leaf ? WINDL : WINDG) : undefined);
+      FLO || m.motionAt?.(x, y, z) || m.fl || (m.em ? EM : glint ? GLINT : (m.leaf || m.blade) && !m.still ? (m.leaf ? WINDL : WINDG) : undefined);
     if (m.leaf && !flat) {
       const lf = m.leaf,
         a = R() * TAU,
@@ -937,6 +969,7 @@ function makeSculpt(B) {
           ramp[
             clamp(Math.floor(t * ramp.length + (R() - 0.5) * (lf.j === undefined ? 1.3 : lf.j)), 0, ramp.length - 1)
           ];
+        if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd, [tx / tl, ty / tl, tz / tl]);
         stick(
           x + nx * 0.04,
           y + ny * 0.04,
@@ -959,6 +992,7 @@ function makeSculpt(B) {
       ci = tones[clamp(Math.floor(li * tones.length + (R() - 0.5) * 1.1), 0, tones.length - 1)];
       const size = (R() < 0.32 ? 0.12 + R() * 0.1 : 0.06 + R() * 0.065) * 2.3 * clamp(res * 5.2, 0.45, 1.1),
         out = 0.04 + R() * size * 0.6;
+      if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd, [tx / tl, ty / tl, tz / tl]);
       stick(
         x + nx * out,
         y + ny * out,
@@ -985,6 +1019,7 @@ function makeSculpt(B) {
         lo = ramp[Math.max(0, k - 1)],
         mid = ramp[k],
         hi = ramp[Math.min(n - 1, k + 1)];
+      if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd);
       disc(x, y, z, [nx, ny, nz], res * S.fat, res * 0.3, P[lo], 3, m.fl);
       if (wear > 0.7 && R() < (wear - 0.7) * 6) return;
       const h = (bl.h || 0.15) * 2.1 * (0.45 + 1.1 * tall) * (0.55 + 0.75 * R()),
@@ -993,6 +1028,7 @@ function makeSculpt(B) {
         lz = (R() - 0.5) * 0.5,
         ll = Math.hypot(lx, 1, lz),
         ax = [lx / ll, 1 / ll, lz / ll];
+      if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd, ax);
       stick(
         x + ax[0] * h * 0.3,
         y + ax[1] * h * 0.3,
@@ -1004,6 +1040,7 @@ function makeSculpt(B) {
         3,
         fl
       );
+      if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd, ax);
       stick(
         x + ax[0] * h * 0.72,
         y + ax[1] * h * 0.72,
@@ -1046,6 +1083,7 @@ function makeSculpt(B) {
       fy -= ny * fn;
       fz -= nz * fn;
       const fm = Math.hypot(fx, fy, fz) || 1;
+      if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd);
       disc(x, y, z, [nx, ny, nz], res * S.fat, res * 0.3, P[ramp[Math.max(0, k - 2)]], 3, m.fl);
       for (let hi = 0; hi < hairs; hi++) {
         const jx = R() - 0.5,
@@ -1074,6 +1112,7 @@ function makeSculpt(B) {
                 ? rr2[clamp(Math.floor(rim * rr2.length), 0, rr2.length - 1)]
                 : ramp[Math.min(n - 1, k + sg + (rim > 0.75 ? 1 : 0))];
           }
+          if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd, ax);
           stick(
             qx + ax[0] * sl * 0.5,
             qy + ax[1] * sl * 0.5,
@@ -1092,12 +1131,29 @@ function makeSculpt(B) {
       }
       return;
     }
-    if (S.fine && !m.glass && (m.a === undefined || m.a >= 1 || glint))
+    if ((S.fine || m0.fine) && !m.glass && (m.a === undefined || m.a >= 1 || glint))
       fineTile(m0, res, x, y, z, nx, ny, nz, full, ci);
     if (S.bounce && !flat && !m.em)
       ((BTAP.ramp[B.count()] = ramp), (BTAP.t[B.count()] = t)); /* kept for the bounce pass */
     if (S.tap) S.tap(ramp, t, nx, ny, nz, flat || !!m.em, ci); // whoever is listening learns how this splat was lit (it is the next one made)
+    /* colour worked out per pixel (S.pixel, for a diorama whose look.pixel is on): the dab says which ramp, how lit, which pattern and
+       which way its surface truly faces; each pixel is then coloured from those where it lands. A colour a material chose itself
+       (a texture with no pattern behind it), a glowing thing, glass and a glint keep the dab's own colour */
+    if (S.pixel && !surface?.opacity && !m.em && !m.glass && !glint && (m.a === undefined || m.a >= 1) && (!flat || m.pat))
+      B.pixNext(
+        ramp,
+        t,
+        m.pat || null,
+        gx,
+        gy,
+        gz,
+        m0.form || m.form ? nx : undefined,
+        ny,
+        nz,
+        m0.line === false || m.line === false
+      );
     // (a: how solid it is, 1 and over is solid, under 1 lets what is behind show through; glass also bends what is behind it)
+    if (surface) B.surfaceNext(surface, nx, ny, nz, L, 1 - shd);
     if (S.follow && !m.glass) {
       formDab(res, x, y, z, nx, ny, nz, P[ci], m.a === undefined || glint ? 3 : m.a, fl);
       return;
@@ -1313,8 +1369,8 @@ function makeSculpt(B) {
   // ---------------- baking ----------------
   // the first surface below (x, y0, z): 1e9 if that point is inside something, -1e9 if nothing is found
   const negAll = []; // carved shapes are kept after baking so openings (arches, doorways) stay open to anything walking the scene
-  const fieldAll = (x, y, z) => {
-    let d = field(x, y, z);
+  const fieldAll = (x, y, z, proxyOnly) => {
+    let d = field(x, y, z, undefined, proxyOnly);
     for (let i = 0; i < negAll.length; i++) {
       const p = negAll[i],
         dx = x - p.bc[0],
@@ -1323,13 +1379,54 @@ function makeSculpt(B) {
         m = p.br + 0.5;
       if (dx * dx + dy * dy + dz * dz > m * m) continue;
       const nd = -psd(p, x, y, z);
-      if (nd > d) d = nd;
+      if (nd > d) {
+        d = nd;
+        ownNeg = p;
+      }
     }
     return d;
   };
-  S.sdf = fieldAll;
+  S.sdf = (x, y, z) => fieldAll(x, y, z);
+  S.proxySdf = () => hasOptionalProxy ? (x, y, z) => fieldAll(x, y, z, true) : S.sdf;
+  /* Material and part ownership at a rest-pose surface. The distance field
+     is retained even when the renderer samples it at a different resolution. */
+  S.surfaceAt = (x, y, z) => {
+    const distance = fieldAll(x, y, z), cut = ownNeg;
+    return { distance, material: cut?.mat?.r ? cut.mat : own?.mat, tag: cut?.tag || own?.tag || null };
+  };
   /* (before a bake the field does not yet know where its solids are: S.ready() tells it, for whoever needs to ask early) */
   S.ready = buildGrid;
+  /* Conservative rest bounds for the still-unbaked finite solids. */
+  S.modelBounds = padding => {
+    if (!pos.length && !neg.length) throw new Error('Model export needs an unbaked sculpt');
+    const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+    for (const p of pos) {
+      if (!Number.isFinite(p.br) || p.br > 1e8) throw new Error('Model export needs finite solids; put the ground in a separate render pass');
+      const r = p.br + Math.max(0, p.k) + padding;
+      for (let a = 0; a < 3; a++) {
+        min[a] = Math.min(min[a], p.bc[a] - r);
+        max[a] = Math.max(max[a], p.bc[a] + r);
+      }
+    }
+    if (!pos.length) throw new Error('Model export needs at least one positive solid');
+    return { min, max };
+  };
+  /* Detach the rest field from the splat bake, which clears its live solids. */
+  S.modelSource = () => {
+    const parts = [], positive = [];
+    for (const solid of pos) {
+      if ((solid.model === 'separate' || solid.model?.separate) && !solid.analytic)
+        throw new Error('A separate sculpt model requires an analytic primitive');
+      if (solid.analytic && (solid.model === 'separate' || solid.model?.separate)) parts.push(solid);
+      else positive.push(solid);
+    }
+    for (const solid of ghosts)
+      if (solid.analytic && (solid.model === 'separate' || solid.model?.separate)) parts.push(solid);
+    if (!positive.length && !parts.length) throw new Error('Model export needs an unbaked sculpt');
+    const field = positive.length ? makeSculpt(B, { positive, negative: [...neg, ...negAll] }) : null;
+    if (field) field.ready();
+    return { field, parts, noise: n3 };
+  };
   S.solidCount = () => pos.length + neg.length;
   S.add = add;
   S.psd = psd; // the finished field (distance to the nearest surface), for whatever comes after the bake
@@ -1417,6 +1514,15 @@ function makeSculpt(B) {
     }
     return open / dirs.length;
   };
+  function shadeOwned(owner, material, ...sample) {
+    if (!B.describeSplats) return light(material, ...sample);
+    const first = B.count();
+    light(material, ...sample);
+    B.describeSplats(first, B.count(), {
+      object: owner?.renderOwner ?? owner,
+      material: material.materialId ?? material
+    });
+  }
   S.bake = () => {
     buildGrid();
     L = S.sun;
@@ -1457,12 +1563,16 @@ function makeSculpt(B) {
               d = psd(p, x, y, z);
             }
             if (Math.abs(d) > res * 0.5 || !p.mat.r || p.mat.skip) return;
+            if (S.capture) {
+              S.capture(p, p.mat, res, x, y, z, nx, ny, nz, 1);
+              return;
+            }
             curP = p;
             if (S.emit) {
               const n0 = B.count();
-              light(p.mat, res, x, y, z, nx, ny, nz, true);
+              shadeOwned(p, p.mat, res, x, y, z, nx, ny, nz, true);
               S.emit(p, n0, B.count());
-            } else light(p.mat, res, x, y, z, nx, ny, nz, true);
+            } else shadeOwned(p, p.mat, res, x, y, z, nx, ny, nz, true);
             return;
           }
           /* a solid whose candidate points may lie well off its own surface (reach: grown rocks, typed-in shapes) has them taken onto
@@ -1518,9 +1628,9 @@ function makeSculpt(B) {
           if (S.emit) {
             const pr = curP,
               n0 = B.count();
-            light(m, res, x, y, z, nx, ny, nz, true);
+            shadeOwned(curP, m, res, x, y, z, nx, ny, nz, true);
             S.emit(pr, n0, B.count());
-          } else light(m, res, x, y, z, nx, ny, nz, true);
+          } else shadeOwned(curP, m, res, x, y, z, nx, ny, nz, true);
         });
       }
       p.res = res0;
@@ -1558,9 +1668,9 @@ function makeSculpt(B) {
         curP = p;
         if (S.emit) {
           const n0 = B.count();
-          light(p.mat, res, x, y, z, nx, ny, nz, !!S.ghostLit);
+          shadeOwned(p, p.mat, res, x, y, z, nx, ny, nz, !!S.ghostLit);
           S.emit(p, n0, B.count());
-        } else light(p.mat, res, x, y, z, nx, ny, nz, !!S.ghostLit);
+        } else shadeOwned(p, p.mat, res, x, y, z, nx, ny, nz, !!S.ghostLit);
       });
       p.res = res;
     }
@@ -1593,8 +1703,11 @@ function makeSculpt(B) {
     for (const k of ['res', 'sun', 'amb', 'sky', 'sunK', 'aoR', 'aoK', 'fat']) S2[k] = S[k];
     if (o.res) S2.res = o.res;
     const samples = [];
-    S2.capture = (pr, m, res, x, y, z, nx, ny, nz) =>
-      samples.push([x, y, z, nx, ny, nz, res, m, pr && pr.along ? pr.along(x, y, z) : 0]);
+    S2.capture = (pr, m, res, x, y, z, nx, ny, nz) => {
+      const sample = [x, y, z, nx, ny, nz, res, m, pr && pr.along ? pr.along(x, y, z) : 0];
+      if (pr?.whole) sample[9] = true;
+      samples.push(sample);
+    };
     build(S2);
     S2.bake();
     const lo = [1e9, 1e9, 1e9],
@@ -1608,6 +1721,7 @@ function makeSculpt(B) {
     return {
       samples,
       sdf: S2.sdf,
+      proxySdf: S2.proxySdf(),
       bc,
       br: Math.hypot(hi[0] - bc[0], hi[1] - bc[1], hi[2] - bc[2]) + 0.05,
       foot: lo[1]
@@ -1615,6 +1729,7 @@ function makeSculpt(B) {
   };
   S.place = (tpl, at, o) => {
     o = o || {};
+    const proxySdf = tpl.proxySdf || tpl.sdf;
     const sc = o.scale || 1,
       yw = o.yaw || 0,
       cy = Math.cos(yw),
@@ -1651,7 +1766,7 @@ function makeSculpt(B) {
             dy = (y - at[1]) / sc,
             dz = (z - at[2]) / sc;
           return (
-            tpl.sdf(
+            proxySdf(
               R[0] * dx + R[3] * dy + R[6] * dz,
               R[1] * dx + R[4] * dy + R[7] * dz,
               R[2] * dx + R[5] * dy + R[8] * dz
@@ -1697,11 +1812,11 @@ function makeSculpt(B) {
           y = I.at[1] + p[1] * I.sc,
           z = I.at[2] + p[2] * I.sc,
           res = q[6] * I.sc;
-        if (field(x, y, z) < -res * 0.6) continue; // buried in something else
+        if (field(x, y, z, q[9] ? I.proxy : undefined) < -res * 0.6) continue; // buried in another solid
         if (S.clip && !S.clip(x, y, z)) continue;
         INST.v = q[8];
         curP = INST;
-        light(q[7], res, x, y, z, nv[0], nv[1], nv[2], true);
+        shadeOwned(I.proxy, q[7], res, x, y, z, nv[0], nv[1], nv[2], true);
       }
     }
     FLO = null;
@@ -1755,7 +1870,7 @@ function makeSculpt(B) {
         mz = nz * (1 - 0.35 * w),
         ml = Math.hypot(mx, my, mz) || 1;
       curP = null;
-      light(mat, res, x + nx * th, y + ny * th, z + nz * th, mx / ml, my / ml, mz / ml, true);
+      shadeOwned(null, mat, res, x + nx * th, y + ny * th, z + nz * th, mx / ml, my / ml, mz / ml, true);
       laid++;
     }
     return laid;
@@ -1944,7 +2059,9 @@ function makeSculpt(B) {
   };
   // A tree: a twisted trunk and roots; main limbs leaving the upper trunk; two to four side
   // branches off each limb; a leaf cluster at the end of every side branch and limb, and one over the top.
-  // o: h (trunk height), r, lean [x, z], nb (limbs), spread (reach of the limbs), cr (cluster size), bark, leaf, roots, res, leaves (count)
+  // o: h (trunk height), r, lean [x, z], nb (limbs), spread (reach of the limbs), cr (cluster size), bark, leaf, roots, res, leaves (count),
+  // shade (false: the crown casts no shadow of its own, for when S.mask says where its shade falls), crown (false: the leaves wait for
+  // .leaves(), so what the crown's clusters are can be known first). -> { top, tips, clusters, leaves }
   S.tree = (x, y, z, o) => {
     const { rr, path } = B,
       h = o.h || 5,
@@ -2029,14 +2146,20 @@ function makeSculpt(B) {
       const c = L0 * rr(0.2, 0.33);
       clusters.push({ p: at(pts, 1), r: [c * 1.25, c * 0.72, c * 1.25] });
     }
+    let leaves = () => 0;
     if (o.leaf) {
       const top = tr(1),
         sn = h / 6.2,
         ls = o.ls || clamp(sn, 0.5, 1.6);
       clusters.push({ p: [top[0], top[1] + L0 * 0.32, top[2]], r: [L0 * 0.36, L0 * 0.24, L0 * 0.36] });
-      S.crown(clusters, o.leaf, o.leaves || Math.round(1900 * Math.min(1, (sn / ls) * (sn / ls))), { scale: ls });
+      leaves = () =>
+        S.crown(clusters, o.leaf, o.leaves || Math.round(1900 * Math.min(1, (sn / ls) * (sn / ls))), {
+          scale: ls,
+          shade: o.shade
+        });
+      if (o.crown !== false) leaves();
     }
-    return { top: tr(1), tips };
+    return { top: tr(1), tips, clusters, leaves };
   };
   return S;
 }
